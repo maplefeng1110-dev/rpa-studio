@@ -27,6 +27,7 @@ export interface StepConfig {
   save_path?: string;
   context_key?: string;
   frame?: string;        // 可选 iframe 定位（选择器或下标）
+  description?: string;  // 目标元素的自然语言描述，DOM 失效时供 AI 兜底定位
 
   // select 下拉选择
   by?: 'text' | 'value' | 'index';

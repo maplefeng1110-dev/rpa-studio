@@ -44,7 +44,7 @@ class ExtractStep(BaseStep):
 
         try:
             # 提取文本（支持候选选择器自愈回退 + iframe）
-            text = browser.text(candidates, timeout=self.timeout, frame=self.frame)
+            text = browser.text(candidates, timeout=self.timeout, frame=self.frame, intent=self.description)
             
             # 存储到 Context
             context.set(self.context_key, text)

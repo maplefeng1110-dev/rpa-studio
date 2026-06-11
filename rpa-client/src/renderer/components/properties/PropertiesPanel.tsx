@@ -251,6 +251,12 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
               onChange={(e) => handleUpdate({ frame: e.target.value || undefined })}
               placeholder="iframe 的选择器或下标，留空表示主文档"
             />
+            <Input
+              label="目标描述（可选，AI 兜底用）"
+              value={selectedStep.description || ''}
+              onChange={(e) => handleUpdate({ description: e.target.value || undefined })}
+              placeholder="如：登录按钮。选择器全失效时供 AI 视觉定位参考"
+            />
           </div>
         )}
 

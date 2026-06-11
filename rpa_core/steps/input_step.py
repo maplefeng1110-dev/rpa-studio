@@ -39,7 +39,7 @@ class InputStep(BaseStep):
             value = ""
 
         try:
-            used = browser.input(candidates, value, timeout=self.timeout, frame=self.frame)
+            used = browser.input(candidates, value, timeout=self.timeout, frame=self.frame, intent=self.description)
             return StepResult(
                 success=True,
                 message=f"成功输入文本到: {used}"

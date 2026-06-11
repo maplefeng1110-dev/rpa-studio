@@ -47,6 +47,8 @@ class BaseStep(ABC):
         self.on_fail: str = config.get("on_fail", "abort")
         # 可选 iframe 定位（选择器或下标）：在该 iframe 内查找元素
         self.frame = config.get("frame")
+        # 可选目标元素的自然语言描述：DOM 失效时供 AI 兜底定位参考
+        self.description = config.get("description")
     
     @abstractmethod
     def execute(self, browser: BrowserAdapter, context: RuntimeContext) -> StepResult:

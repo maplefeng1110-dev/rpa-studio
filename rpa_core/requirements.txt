@@ -14,3 +14,6 @@ websockets>=12.0
 
 # 凭据保险库的认证加密 (Fernet / AES)
 cryptography>=42.0.0
+
+# AI 视觉兜底定位 / 选择器修复（可选，仅在开启 RPA_AI_FALLBACK 时需要）
+anthropic>=0.40

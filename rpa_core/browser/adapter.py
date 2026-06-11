@@ -61,17 +61,70 @@ class BrowserAdapter:
     - 支持有头/无头模式切换
     """
     
-    def __init__(self, headless: bool = False):
+    def __init__(self, headless: bool = False, ai_locator=None):
         """
         初始化浏览器适配器
-        
+
         Args:
             headless: 是否使用无头模式
+            ai_locator: 可选的 AI 兜底定位器（AILocator）。DOM 候选全部失效时启用。
         """
         self._page: Optional[ChromiumPage] = None
         self._headless = headless
+        self._ai_locator = ai_locator
         # 当前操作目标：可被 switch_tab/new_tab 切换为某个标签页对象；None 表示主页面
         self._active = None
+
+    def _ai_resolve(self, candidates: List[str], intent: Optional[str], allow_coordinates: bool):
+        """
+        DOM 失败后的 AI 兜底。返回：
+          ("element", 元素, 选择器) —— LLM 给出可解析的修复选择器
+          ("coords", (x, y), None) —— LLM 给出点击坐标（仅 allow_coordinates 时）
+          None —— 不可用或无法定位
+        """
+        if not (self._ai_locator and self._ai_locator.available):
+            return None
+        target = self._target()
+        # 捕获截图 + 精简 DOM + 视口尺寸，任何一步失败都不应中断（降级为可用的部分）
+        screenshot = html = viewport = None
+        try:
+            screenshot = target.get_screenshot(as_bytes="png")
+        except Exception:
+            pass
+        try:
+            html = target.html
+        except Exception:
+            pass
+        try:
+            viewport = {
+                "width": int(target._run_js("return window.innerWidth;")),
+                "height": int(target._run_js("return window.innerHeight;")),
+            }
+        except Exception:
+            pass
+
+        result = self._ai_locator.locate(
+            intent=intent, failed_selectors=candidates, html=html,
+            screenshot_png=screenshot, viewport=viewport, allow_coordinates=allow_coordinates,
+        )
+        if not result:
+            return None
+
+        if result["strategy"] == "selector":
+            sel = result["selector"]
+            try:
+                element = target.ele(normalize_selector(sel), timeout=5)
+            except Exception:
+                element = None
+            if element:
+                logger.warning(f"AI 选择器修复：DOM 候选全失效，改用 LLM 给出的 '{sel}'")
+                return ("element", element, sel)
+            return None
+
+        if result["strategy"] == "coordinates":
+            logger.warning(f"AI 视觉兜底：DOM 无法定位，改用坐标点击 ({result['x']},{result['y']})")
+            return ("coords", (result["x"], result["y"]), None)
+        return None
 
     def _target(self):
         """返回当前操作目标（激活的标签页或主页面）。所有元素/页面操作都走它。"""
@@ -174,14 +227,28 @@ class BrowserAdapter:
         detail = f"，最后错误: {last_error}" if last_error else ""
         raise ElementNotFoundError(f"元素未找到（已尝试 {len(candidates)} 个候选）: {candidates}{detail}")
 
-    def click(self, selector: Union[str, List[str]], timeout: int = 10, frame: Union[str, int, None] = None) -> str:
+    def click(self, selector: Union[str, List[str]], timeout: int = 10, frame: Union[str, int, None] = None,
+              intent: Optional[str] = None) -> str:
         """
-        点击元素。selector 可为单个选择器或候选列表（自愈回退）；frame 可指定 iframe。
+        点击元素。DOM 候选全失效时走 AI 兜底（修复选择器或坐标点击）。
 
         Returns:
-            实际命中的选择器
+            实际命中的选择器（坐标点击时返回 'ai:coordinates'）
         """
-        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
+        try:
+            element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
+        except ElementNotFoundError:
+            resolved = self._ai_resolve(_as_candidates(selector), intent, allow_coordinates=True)
+            if resolved is None:
+                raise
+            kind, payload, used = resolved
+            if kind == "coords":
+                try:
+                    self._target().actions.move_to(payload).click()
+                except Exception as e:
+                    raise ElementNotFoundError(f"坐标点击失败 {payload}, 错误: {str(e)}")
+                return "ai:coordinates"
+            element = payload  # kind == "element"
         try:
             element.click()
         except Exception as e:
@@ -189,14 +256,14 @@ class BrowserAdapter:
         return used
 
     def input(self, selector: Union[str, List[str]], text: str, timeout: int = 10, clear: bool = True,
-              frame: Union[str, int, None] = None) -> str:
+              frame: Union[str, int, None] = None, intent: Optional[str] = None) -> str:
         """
-        输入文本。selector 可为单个选择器或候选列表（自愈回退）；frame 可指定 iframe。
+        输入文本。DOM 候选全失效时走 AI 选择器修复（输入需要真实元素，不用坐标）。
 
         Returns:
             实际命中的选择器
         """
-        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
+        element, used = self._resolve_for_value_op(selector, timeout, frame, intent, "输入文本")
         try:
             if clear:
                 element.clear()
@@ -206,33 +273,32 @@ class BrowserAdapter:
         return used
 
     def exists(self, selector: Union[str, List[str]], timeout: int = 3, frame: Union[str, int, None] = None) -> bool:
-        """判断元素是否存在（任一候选命中即为存在）。"""
+        """判断元素是否存在（任一候选命中即为存在）。不触发 AI 兜底。"""
         try:
             self._find_element(selector, timeout=timeout, frame=frame)
             return True
         except ElementNotFoundError:
             return False
 
-    def text(self, selector: Union[str, List[str]], timeout: int = 10, frame: Union[str, int, None] = None) -> str:
-        """
-        获取元素文本内容。selector 可为单个选择器或候选列表（自愈回退）；frame 可指定 iframe。
-        """
-        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
+    def text(self, selector: Union[str, List[str]], timeout: int = 10, frame: Union[str, int, None] = None,
+             intent: Optional[str] = None) -> str:
+        """获取元素文本内容。DOM 候选全失效时走 AI 选择器修复。"""
+        element, used = self._resolve_for_value_op(selector, timeout, frame, intent, "获取元素文本")
         try:
             return element.text
         except Exception as e:
             raise ElementNotFoundError(f"获取元素文本失败: {used}, 错误: {str(e)}")
 
     def select_option(self, selector: Union[str, List[str]], by: str, value: Union[str, int],
-                      timeout: int = 10, frame: Union[str, int, None] = None) -> str:
+                      timeout: int = 10, frame: Union[str, int, None] = None, intent: Optional[str] = None) -> str:
         """
-        操作 <select> 下拉框。
+        操作 <select> 下拉框。DOM 候选全失效时走 AI 选择器修复。
 
         Args:
             by: 'text' | 'value' | 'index'
             value: 对应的选项文本/值/下标
         """
-        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
+        element, used = self._resolve_for_value_op(selector, timeout, frame, intent, "下拉选择")
         try:
             sel = element.select
             if by == "text":
@@ -248,6 +314,20 @@ class BrowserAdapter:
         except Exception as e:
             raise ElementNotFoundError(f"下拉选择失败: {used} by={by} value={value}, 错误: {str(e)}")
         return used
+
+    def _resolve_for_value_op(self, selector, timeout, frame, intent, op_label):
+        """
+        为 input/text/select 等「需要真实元素」的操作定位元素：
+        先走 DOM 自愈，全失败再走 AI 选择器修复（不接受坐标）。返回 (元素, 命中选择器)。
+        """
+        try:
+            element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
+            return element, used
+        except ElementNotFoundError:
+            resolved = self._ai_resolve(_as_candidates(selector), intent, allow_coordinates=False)
+            if resolved is None or resolved[0] != "element":
+                raise
+            return resolved[1], resolved[2]
 
     def switch_tab(self, target: Union[str, int]) -> None:
         """

@@ -35,7 +35,7 @@ class SelectStep(BaseStep):
 
         try:
             used = browser.select_option(candidates, by=self.by, value=value,
-                                         timeout=self.timeout, frame=self.frame)
+                                         timeout=self.timeout, frame=self.frame, intent=self.description)
             return StepResult(
                 success=True,
                 message=f"成功选择下拉项: {used} by={self.by} value={value}"

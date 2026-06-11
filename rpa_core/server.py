@@ -27,6 +27,7 @@ from rpa_core.browser import BrowserAdapter
 from rpa_core.storage import RunHistory
 from rpa_core.scheduler import Scheduler, cron
 from rpa_core.vault import get_vault
+from rpa_core.ai import AILocator
 from rpa_core.utils import setup_logger
 
 # 配置日志
@@ -168,6 +169,9 @@ _history = RunHistory()
 # 凭据保险库（加密）
 _vault = get_vault()
 
+# AI 视觉兜底定位（按 RPA_AI_FALLBACK 开关 + ANTHROPIC_API_KEY 决定是否真正可用）
+_ai_locator = AILocator()
+
 
 def _record_run(result: ExecutionResult) -> None:
     """把一次执行结果写入运行历史；记录失败不影响主流程。"""
@@ -198,7 +202,7 @@ def get_shared_browser() -> BrowserAdapter:
     global _shared_browser
     with _browser_init_lock:
         if _shared_browser is None:
-            _shared_browser = BrowserAdapter()
+            _shared_browser = BrowserAdapter(ai_locator=_ai_locator)
         return _shared_browser
 
 

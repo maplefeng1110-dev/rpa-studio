@@ -573,5 +573,125 @@ class TestSecretInContext(unittest.TestCase):
         self.assertNotIn("pw", ctx.to_dict())
 
 
+class TestAIFallback(unittest.TestCase):
+    """测试 AI 视觉兜底定位（DOM 全失效后），用假 locator + 假 page，不联网"""
+
+    class FakeEle:
+        def __init__(self, tag): self.tag = tag; self.clicked = False; self.text = "ok"
+        def click(self): self.clicked = True
+        def clear(self): pass
+        def input(self, t): self.typed = t
+
+    class FakeActions:
+        def __init__(self): self.moved = None; self.clicked = False
+        def move_to(self, loc): self.moved = loc; return self
+        def click(self): self.clicked = True
+
+    class FakePage:
+        def __init__(self, ai_selector_norm=None, ai_ele=None):
+            self.ai_selector_norm = ai_selector_norm
+            self.ai_ele = ai_ele
+            self.actions = TestAIFallback.FakeActions()
+            self.html = "<html></html>"
+        def ele(self, sel, timeout=10):
+            # 原 DOM 候选全部失败；只有 AI 修复后的选择器能命中
+            if self.ai_selector_norm and sel == self.ai_selector_norm:
+                return self.ai_ele
+            return None
+        def get_screenshot(self, as_bytes=None): return b"PNGDATA"
+        def _run_js(self, js): return 1000
+
+    class FakeLocator:
+        def __init__(self, result): self._result = result; self.available = True
+        def locate(self, **kwargs): self.last_kwargs = kwargs; return self._result
+
+    def _adapter(self, page, result):
+        from rpa_core.browser.adapter import BrowserAdapter
+        a = BrowserAdapter(ai_locator=TestAIFallback.FakeLocator(result))
+        a._page = page
+        return a
+
+    def test_click_ai_selector_repair(self):
+        ele = TestAIFallback.FakeEle("fixed")
+        page = TestAIFallback.FakePage(ai_selector_norm="css:#ai-fixed", ai_ele=ele)
+        a = self._adapter(page, {"strategy": "selector", "selector": "#ai-fixed", "reason": "r"})
+        used = a.click("#gone", timeout=1, intent="登录按钮")
+        self.assertEqual(used, "#ai-fixed")
+        self.assertTrue(ele.clicked)
+
+    def test_click_ai_coordinates(self):
+        page = TestAIFallback.FakePage()
+        a = self._adapter(page, {"strategy": "coordinates", "x": 42, "y": 99, "reason": "canvas"})
+        used = a.click("#gone", timeout=1)
+        self.assertEqual(used, "ai:coordinates")
+        self.assertEqual(page.actions.moved, (42, 99))
+        self.assertTrue(page.actions.clicked)
+
+    def test_input_rejects_coordinates(self):
+        from rpa_core.browser.adapter import ElementNotFoundError
+        page = TestAIFallback.FakePage()
+        a = self._adapter(page, {"strategy": "coordinates", "x": 1, "y": 2})
+        with self.assertRaises(ElementNotFoundError):
+            a.input("#gone", "hi", timeout=1)
+
+    def test_input_ai_selector_repair(self):
+        ele = TestAIFallback.FakeEle("field")
+        page = TestAIFallback.FakePage(ai_selector_norm="css:.ai-field", ai_ele=ele)
+        a = self._adapter(page, {"strategy": "selector", "selector": ".ai-field"})
+        used = a.input("#gone", "hello", timeout=1)
+        self.assertEqual(used, ".ai-field")
+        self.assertEqual(ele.typed, "hello")
+
+    def test_no_locator_raises(self):
+        from rpa_core.browser.adapter import BrowserAdapter, ElementNotFoundError
+        a = BrowserAdapter()  # 无 AI locator
+        a._page = TestAIFallback.FakePage()
+        with self.assertRaises(ElementNotFoundError):
+            a.click("#gone", timeout=1)
+
+
+class TestAILocatorParsing(unittest.TestCase):
+    """测试 AILocator 对 LLM 结构化响应的解析（注入假 client，不联网）"""
+
+    class _Block:
+        def __init__(self, text): self.type = "text"; self.text = text
+
+    class _Resp:
+        def __init__(self, text): self.content = [TestAILocatorParsing._Block(text)]
+
+    class _FakeClient:
+        def __init__(self, text): self._text = text
+        class _Messages:
+            def __init__(self, text): self._text = text
+            def create(self, **kwargs): return TestAILocatorParsing._Resp(self._text)
+        @property
+        def messages(self): return TestAILocatorParsing._FakeClient._Messages(self._text)
+
+    def _locator(self, text):
+        from rpa_core.ai import AILocator
+        loc = AILocator(enabled=True)
+        loc._client = TestAILocatorParsing._FakeClient(text)
+        return loc
+
+    def test_parse_selector(self):
+        loc = self._locator('{"strategy":"selector","selector":"css:.x","x":null,"y":null,"reason":"r"}')
+        r = loc.locate(intent="x", failed_selectors=["#a"])
+        self.assertEqual(r["strategy"], "selector")
+        self.assertEqual(r["selector"], "css:.x")
+
+    def test_parse_coordinates(self):
+        loc = self._locator('{"strategy":"coordinates","selector":null,"x":10,"y":20,"reason":"r"}')
+        r = loc.locate(failed_selectors=["#a"])
+        self.assertEqual((r["x"], r["y"]), (10, 20))
+
+    def test_coordinates_suppressed_when_not_allowed(self):
+        loc = self._locator('{"strategy":"coordinates","selector":null,"x":10,"y":20,"reason":"r"}')
+        self.assertIsNone(loc.locate(failed_selectors=["#a"], allow_coordinates=False))
+
+    def test_parse_none(self):
+        loc = self._locator('{"strategy":"none","selector":null,"x":null,"y":null,"reason":"r"}')
+        self.assertIsNone(loc.locate(failed_selectors=["#a"]))
+
+
 if __name__ == "__main__":
     unittest.main()
