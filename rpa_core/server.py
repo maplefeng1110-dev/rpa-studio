@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import os
 import uuid
 import asyncio
@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, ConfigDict
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from rpa_core import FlowEngine, ExecutionResult
-from rpa_core.browser import BrowserAdapter
+from rpa_core.browser import BrowserAdapter, BrowserPool
 from rpa_core.storage import RunHistory
 from rpa_core.scheduler import Scheduler, cron
 from rpa_core.vault import get_vault
@@ -169,6 +169,16 @@ _shared_browser: Optional[BrowserAdapter] = None
 _browser_init_lock = threading.Lock()
 _execution_lock = threading.Lock()
 
+# 并发执行：RPA_BROWSER_POOL_SIZE > 1 时启用 headless 浏览器池，解除单浏览器串行。
+# 默认 1 —— 沿用「单个可见浏览器 + 执行锁串行」（可观察、拾取共用同一窗口，零行为变化）。
+_pool_size = max(1, int(os.environ.get("RPA_BROWSER_POOL_SIZE", "1")))
+_browser_pool: Optional[BrowserPool] = None
+
+
+class BrowserBusy(Exception):
+    """没有空闲浏览器可供执行（串行模式下已有流程在跑，或池已满）。"""
+    pass
+
 # 运行历史（SQLite）
 _history = RunHistory()
 
@@ -192,11 +202,11 @@ def _record_run(result: ExecutionResult) -> None:
 
 def _run_scheduled_flow(flow: Dict[str, Any], initial_context: Dict[str, Any]) -> ExecutionResult:
     """
-    调度器执行流程的回调：在 worker 线程中阻塞执行。
-    与手动执行共用同一把执行锁，确保不会两个流程同时驱动唯一的浏览器。
+    调度器执行流程的回调：在 worker 线程中阻塞借浏览器执行。
+    串行模式下与手动执行共用执行锁；池模式下从池借一个 headless 浏览器。
     """
-    with _execution_lock:
-        engine = FlowEngine(browser=get_shared_browser(), secret_resolver=_vault.get)
+    with execution_browser(block=True) as browser:
+        engine = FlowEngine(browser=browser, secret_resolver=_vault.get)
         result = engine.execute(flow, initial_context)
         _record_run(result)
         return result
@@ -207,7 +217,7 @@ _scheduler = Scheduler(run_callback=_run_scheduled_flow)
 
 
 def get_shared_browser() -> BrowserAdapter:
-    """获取（必要时惰性创建）共享浏览器实例。线程安全。"""
+    """获取（必要时惰性创建）共享浏览器实例。拾取元素与串行执行共用它。线程安全。"""
     global _shared_browser
     with _browser_init_lock:
         if _shared_browser is None:
@@ -215,22 +225,69 @@ def get_shared_browser() -> BrowserAdapter:
         return _shared_browser
 
 
+def _get_pool() -> Optional[BrowserPool]:
+    global _browser_pool
+    if _pool_size <= 1:
+        return None
+    if _browser_pool is None:
+        with _browser_init_lock:
+            if _browser_pool is None:
+                _browser_pool = BrowserPool(
+                    _pool_size,
+                    factory=lambda: BrowserAdapter(headless=True, ai_locator=_ai_locator),
+                )
+    return _browser_pool
+
+
+def acquire_execution_browser(block: bool = False):
+    """
+    借一个用于执行的浏览器。返回 (adapter, release_fn)；无空闲则抛 BrowserBusy。
+    适合需要跨 await 持有浏览器的异步入口（/execute、/ws）。
+    - 池模式（RPA_BROWSER_POOL_SIZE>1）：从 headless 池借/还，支持真并发。
+    - 串行模式（默认）：用执行锁串行化，借出共享的可见浏览器（可观察、与拾取共用）。
+    """
+    pool = _get_pool()
+    if pool is not None:
+        adapter = pool.acquire(block=block)
+        if adapter is None:
+            raise BrowserBusy()
+        return adapter, (lambda: pool.release(adapter))
+    acquired = _execution_lock.acquire(blocking=block)
+    if not acquired:
+        raise BrowserBusy()
+    return get_shared_browser(), _execution_lock.release
+
+
+@contextmanager
+def execution_browser(block: bool = False):
+    """借浏览器的上下文管理器（同步场景，如调度 worker 线程）。"""
+    adapter, release = acquire_execution_browser(block=block)
+    try:
+        yield adapter
+    finally:
+        release()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global _shared_browser
     logger.info("启动 RPA Server...")
+    if _pool_size > 1:
+        logger.info(f"浏览器池已启用，容量 = {_pool_size}（headless 并发执行）")
     _scheduler.start()
 
     yield
 
-    # 清理资源：停止调度、关闭共享浏览器
+    # 清理资源：停止调度、关闭共享浏览器与浏览器池
     logger.info("关闭 RPA Server...")
     _scheduler.stop()
     with _browser_init_lock:
         if _shared_browser is not None:
             _shared_browser.close()
             _shared_browser = None
+    if _browser_pool is not None:
+        _browser_pool.close_all()
 
 
 # ============================================
@@ -329,7 +386,7 @@ async def ws_execute_flow(websocket: WebSocket, token: Optional[str] = None):
     logger.info("WebSocket Token 验证通过")
 
     engine: Optional[FlowEngine] = None
-    lock_acquired = False
+    release_browser = None
     try:
         # 等待客户端发送初始运行配置
         init_data = await websocket.receive_json()
@@ -348,16 +405,17 @@ async def ws_execute_flow(websocket: WebSocket, token: Optional[str] = None):
             await websocket.close(code=1003)
             return
 
-        # 串行化：共享单一浏览器，无法并行驱动两个流程
-        lock_acquired = _execution_lock.acquire(blocking=False)
-        if not lock_acquired:
-            await websocket.send_json({"type": "error", "message": "已有流程正在执行，请稍后再试"})
+        # 借一个执行浏览器（串行模式=共享可见浏览器；池模式=headless 并发）
+        try:
+            browser, release_browser = acquire_execution_browser(block=False)
+        except BrowserBusy:
+            await websocket.send_json({"type": "error", "message": "无空闲浏览器，请稍后再试"})
             await websocket.close(code=1013)
             return
 
         # 每次执行新建独立引擎：拥有自己的 Context / 计数器 / 暂停-停止标志
         loop = asyncio.get_running_loop()
-        engine = FlowEngine(browser=get_shared_browser(), secret_resolver=_vault.get)
+        engine = FlowEngine(browser=browser, secret_resolver=_vault.get)
         engine.log_callback = make_log_callback(websocket, loop)
 
         # 在线程池中执行流程
@@ -418,16 +476,18 @@ async def ws_execute_flow(websocket: WebSocket, token: Optional[str] = None):
     finally:
         if engine is not None:
             engine.log_callback = None
-        if lock_acquired:
-            _execution_lock.release()
+        if release_browser is not None:
+            release_browser()
 
 
 @app.post("/execute", response_model=ExecuteResponse, dependencies=[Depends(verify_token)])
 async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
     """执行 Flow"""
-    # 串行化：共享单一浏览器，无法并行驱动两个流程
-    if not _execution_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="已有流程正在执行，请稍后再试")
+    # 借一个执行浏览器（串行模式=共享可见浏览器；池模式=headless 并发）
+    try:
+        browser, release_browser = acquire_execution_browser(block=False)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="无空闲浏览器，请稍后再试")
 
     try:
         # 将 Pydantic 模型转换为字典（extra='allow' 保留 if/loop 等控制流字段）
@@ -435,8 +495,8 @@ async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
 
         logger.info(f"收到执行请求: {flow_dict['name']}, {len(flow_dict['steps'])} 个步骤")
 
-        # 每次执行新建独立引擎，避免并发串改状态；浏览器共享但已被锁串行化
-        engine = FlowEngine(browser=get_shared_browser(), secret_resolver=_vault.get)
+        # 每次执行新建独立引擎，避免并发串改状态
+        engine = FlowEngine(browser=browser, secret_resolver=_vault.get)
 
         # 在线程池中执行，避免阻塞事件循环
         loop = asyncio.get_running_loop()
@@ -470,7 +530,7 @@ async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
         logger.error(f"执行出错: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        _execution_lock.release()
+        release_browser()
 
 
 @app.post("/validate", dependencies=[Depends(verify_token)])

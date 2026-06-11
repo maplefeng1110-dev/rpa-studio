@@ -759,5 +759,55 @@ class TestFlowGen(unittest.TestCase):
         self.assertIn("JSON", r["error"])
 
 
+class TestBrowserPool(unittest.TestCase):
+    """测试浏览器池：懒创建、借满返回 None、归还复用、close_all"""
+
+    class FakeAdapter:
+        def __init__(self): self.closed = False
+        def close(self): self.closed = True
+
+    def _pool(self, size):
+        from rpa_core.browser import BrowserPool
+        self.created = []
+        def factory():
+            a = TestBrowserPool.FakeAdapter()
+            self.created.append(a)
+            return a
+        return BrowserPool(size, factory)
+
+    def test_lazy_creation_and_exhaustion(self):
+        pool = self._pool(2)
+        self.assertEqual(len(self.created), 0)  # 懒创建：还没借就不创建
+        a1 = pool.acquire(block=False)
+        a2 = pool.acquire(block=False)
+        self.assertEqual(len(self.created), 2)
+        self.assertIsNotNone(a1)
+        self.assertIsNotNone(a2)
+        self.assertIsNot(a1, a2)
+        # 池已满，非阻塞借取返回 None
+        self.assertIsNone(pool.acquire(block=False))
+
+    def test_release_allows_reacquire(self):
+        pool = self._pool(1)
+        a1 = pool.acquire(block=False)
+        self.assertIsNone(pool.acquire(block=False))
+        pool.release(a1)
+        a2 = pool.acquire(block=False)
+        self.assertIs(a1, a2)  # 复用归还的实例，未新建
+        self.assertEqual(len(self.created), 1)
+
+    def test_close_all(self):
+        pool = self._pool(2)
+        a1 = pool.acquire(block=False)
+        a2 = pool.acquire(block=False)
+        pool.close_all()
+        self.assertTrue(a1.closed and a2.closed)
+
+    def test_invalid_size(self):
+        from rpa_core.browser import BrowserPool
+        with self.assertRaises(ValueError):
+            BrowserPool(0, lambda: None)
+
+
 if __name__ == "__main__":
     unittest.main()
