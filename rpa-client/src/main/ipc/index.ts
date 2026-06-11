@@ -12,6 +12,7 @@ const IPC_CHANNELS = [
   'python:start', 'python:stop', 'python:status', 'python:token',
   'api:health', 'api:execute', 'api:validate', 'api:step-types',
   'api:pick-element-start', 'api:pick-element-result',
+  'api:secrets-list', 'api:secrets-set', 'api:secrets-delete',
 ];
 
 export function registerIpcHandlers(mainWindow: BrowserWindow | null): void {

@@ -51,6 +51,9 @@ const api = {
     getStepTypes: () => ipcRenderer.invoke('api:step-types'),
     pickElementStart: () => ipcRenderer.invoke('api:pick-element-start'),
     pickElementResult: () => ipcRenderer.invoke('api:pick-element-result'),
+    secretsList: () => ipcRenderer.invoke('api:secrets-list'),
+    secretsSet: (name: string, value: string) => ipcRenderer.invoke('api:secrets-set', name, value),
+    secretsDelete: (name: string) => ipcRenderer.invoke('api:secrets-delete', name),
   },
 };
 

@@ -7,6 +7,7 @@ import type { RootState, AppDispatch } from '../../store';
 import type { FlowDefinition } from '../../types/flow';
 import { createFlow, clearDirty, setFlow, setFlows } from '../../store/flowSlice';
 import { Button } from '../common/Button';
+import { SecretsModal } from '../secrets/SecretsModal';
 import { useIpc } from '../../hooks/useIpc';
 import { useExecution } from '../../hooks/useExecution';
 
@@ -21,6 +22,7 @@ export const Header: React.FC<HeaderProps> = () => {
   const flows = useSelector((state: RootState) => state.flow.flows);
 
   const [openMenu, setOpenMenu] = useState(false);
+  const [secretsOpen, setSecretsOpen] = useState(false);
   const didInit = useRef(false);
 
   // 拉取已保存流程列表（后端按更新时间倒序返回）
@@ -152,6 +154,10 @@ export const Header: React.FC<HeaderProps> = () => {
         <Button variant="secondary" onClick={handleSave} disabled={!currentFlow || !isDirty || status === 'running' || status === 'paused'}>
           保存
         </Button>
+
+        <Button variant="secondary" onClick={() => setSecretsOpen(true)}>
+          🔐 凭据
+        </Button>
         
         {status === 'running' && (
           <Button variant="secondary" onClick={pause}>
@@ -181,6 +187,8 @@ export const Header: React.FC<HeaderProps> = () => {
           </Button>
         )}
       </div>
+
+      {secretsOpen && <SecretsModal onClose={() => setSecretsOpen(false)} />}
     </header>
   );
 };

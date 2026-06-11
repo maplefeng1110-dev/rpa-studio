@@ -201,6 +201,26 @@ export function useIpc() {
     return '';
   }, []);
 
+  // 凭据保险库
+  const secretsList = useCallback(async () => {
+    if (hasElectronAPI) {
+      return await (window as any).electronAPI.api.secretsList();
+    }
+    return httpRequest('/secrets');
+  }, []);
+  const secretsSet = useCallback(async (name: string, value: string) => {
+    if (hasElectronAPI) {
+      return await (window as any).electronAPI.api.secretsSet(name, value);
+    }
+    return { success: false, error: 'API not available' };
+  }, []);
+  const secretsDelete = useCallback(async (name: string) => {
+    if (hasElectronAPI) {
+      return await (window as any).electronAPI.api.secretsDelete(name);
+    }
+    return { success: false, error: 'API not available' };
+  }, []);
+
   // 监听 Python 日志
   useEffect(() => {
     if (hasElectronAPI) {
@@ -247,6 +267,9 @@ export function useIpc() {
       getStepTypes: apiGetStepTypes,
       pickElementStart: apiPickElementStart,
       pickElementResult: apiPickElementResult,
+      secretsList,
+      secretsSet,
+      secretsDelete,
     },
   };
 }

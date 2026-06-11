@@ -155,4 +155,49 @@ export function registerPythonHandlers(mainWindow: BrowserWindow | null): void {
       return { success: false, error: (err as Error).message };
     }
   });
+
+  // 凭据保险库：列出名称（不含明文）
+  ipcMain.handle('api:secrets-list', async () => {
+    try {
+      const response = await fetch(`${pythonManager.getApiUrl()}/secrets`, {
+        headers: { 'X-RPA-Token': pythonManager.getApiToken() },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  });
+
+  // 凭据保险库：新增/更新
+  ipcMain.handle('api:secrets-set', async (_event, name: string, value: string) => {
+    try {
+      const response = await fetch(`${pythonManager.getApiUrl()}/secrets`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-RPA-Token': pythonManager.getApiToken(),
+        },
+        body: JSON.stringify({ name, value }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  });
+
+  // 凭据保险库：删除
+  ipcMain.handle('api:secrets-delete', async (_event, name: string) => {
+    try {
+      const response = await fetch(`${pythonManager.getApiUrl()}/secrets/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+        headers: { 'X-RPA-Token': pythonManager.getApiToken() },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  });
 }
