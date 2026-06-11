@@ -45,6 +45,8 @@ class BaseStep(ABC):
         self.value: Optional[str] = config.get("value")
         self.timeout: int = config.get("timeout", 10)
         self.on_fail: str = config.get("on_fail", "abort")
+        # 可选 iframe 定位（选择器或下标）：在该 iframe 内查找元素
+        self.frame = config.get("frame")
     
     @abstractmethod
     def execute(self, browser: BrowserAdapter, context: RuntimeContext) -> StepResult:

@@ -3,7 +3,17 @@
  */
 
 // Step 类型
-export type StepType = 'open' | 'click' | 'input' | 'wait' | 'extract' | 'if' | 'loop';
+export type StepType =
+  | 'open'
+  | 'click'
+  | 'input'
+  | 'wait'
+  | 'extract'
+  | 'if'
+  | 'loop'
+  | 'select'
+  | 'switch_tab'
+  | 'download';
 
 // Step 配置
 export interface StepConfig {
@@ -16,6 +26,14 @@ export interface StepConfig {
   on_fail: 'abort' | 'skip' | 'retry';
   save_path?: string;
   context_key?: string;
+  frame?: string;        // 可选 iframe 定位（选择器或下标）
+
+  // select 下拉选择
+  by?: 'text' | 'value' | 'index';
+
+  // switch_tab 标签页切换
+  new_tab?: boolean;
+  url?: string;
   
   // 重试机制
   max_retries?: number;
@@ -142,6 +160,33 @@ export const STEP_TYPE_METAS: Record<StepType, StepTypeMeta> = {
     requiredFields: ['loop_type', 'value'],
     optionalFields: ['item_key', 'index_key', 'on_fail'],
   },
+  select: {
+    type: 'select',
+    name: '下拉选择',
+    description: '操作下拉框，按文本/值/下标选择',
+    icon: '🔽',
+    color: 'bg-teal-100 border-teal-300',
+    requiredFields: ['selector', 'value'],
+    optionalFields: ['by', 'timeout', 'on_fail', 'frame'],
+  },
+  switch_tab: {
+    type: 'switch_tab',
+    name: '切换标签页',
+    description: '切换标签页或打开新标签页',
+    icon: '🗂️',
+    color: 'bg-cyan-100 border-cyan-300',
+    requiredFields: [],
+    optionalFields: ['value', 'new_tab', 'url', 'on_fail'],
+  },
+  download: {
+    type: 'download',
+    name: '文件下载',
+    description: '点击触发下载并等待完成',
+    icon: '⬇️',
+    color: 'bg-lime-100 border-lime-300',
+    requiredFields: ['selector'],
+    optionalFields: ['save_path', 'timeout', 'on_fail', 'frame'],
+  },
 };
 
 // 创建默认 Step
@@ -171,6 +216,14 @@ export function createDefaultStep(type: StepType): StepConfig {
       index_key: 'index',
       steps: [],
     };
+  }
+
+  if (type === 'select') {
+    return { ...baseStep, by: 'text' };
+  }
+
+  if (type === 'switch_tab') {
+    return { ...baseStep, value: 'latest' };
   }
 
   return baseStep;

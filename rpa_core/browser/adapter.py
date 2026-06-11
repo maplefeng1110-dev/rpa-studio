@@ -70,7 +70,14 @@ class BrowserAdapter:
         """
         self._page: Optional[ChromiumPage] = None
         self._headless = headless
-    
+        # 当前操作目标：可被 switch_tab/new_tab 切换为某个标签页对象；None 表示主页面
+        self._active = None
+
+    def _target(self):
+        """返回当前操作目标（激活的标签页或主页面）。所有元素/页面操作都走它。"""
+        self._ensure_page()
+        return self._active or self._page
+
     def _ensure_page(self) -> ChromiumPage:
         """确保页面实例存在"""
         if self._page is None:
@@ -100,15 +107,16 @@ class BrowserAdapter:
             timeout: 超时时间（秒）
         """
         try:
-            page = self._ensure_page()
-            page.get(url, timeout=timeout)
+            target = self._target()
+            target.get(url, timeout=timeout)
         except Exception as e:
             raise PageLoadTimeoutError(f"页面加载超时或失败: {url}, 错误: {str(e)}")
-    
+
     def _find_element(
         self,
         selector: Union[str, List[str]],
         timeout: int = 10,
+        frame: Union[str, int, None] = None,
     ) -> Tuple[object, str, int]:
         """
         按候选选择器顺序定位元素，实现「选择器自愈」：
@@ -118,6 +126,7 @@ class BrowserAdapter:
         Args:
             selector: 单个选择器或候选选择器列表（按优先级排序）
             timeout: 首选选择器的超时时间；后续候选用较短超时避免叠加等待
+            frame: 可选 iframe 定位（选择器或下标），在该 iframe 内查找元素
 
         Returns:
             (元素, 命中的原始选择器, 命中候选的下标)
@@ -129,7 +138,19 @@ class BrowserAdapter:
         if not candidates:
             raise ElementNotFoundError("未提供任何选择器")
 
-        page = self._ensure_page()
+        # 确定查找容器：iframe（若指定）或当前激活目标
+        container = self._target()
+        if frame is not None and frame != "":
+            try:
+                frame_loc = frame if isinstance(frame, int) else normalize_selector(str(frame))
+                container = self._target().get_frame(frame_loc, timeout=timeout)
+                if not container:
+                    raise ElementNotFoundError(f"iframe 未找到: {frame}")
+            except ElementNotFoundError:
+                raise
+            except Exception as e:
+                raise ElementNotFoundError(f"切换 iframe 失败: {frame}, 错误: {str(e)}")
+
         last_error: Optional[str] = None
 
         for idx, raw in enumerate(candidates):
@@ -137,7 +158,7 @@ class BrowserAdapter:
             # 首选用完整 timeout，后备候选用较短超时（最多 3s）
             attempt_timeout = timeout if idx == 0 else min(timeout, 3)
             try:
-                element = page.ele(normalized, timeout=attempt_timeout)
+                element = container.ele(normalized, timeout=attempt_timeout)
             except Exception as e:
                 last_error = str(e)
                 element = None
@@ -153,28 +174,29 @@ class BrowserAdapter:
         detail = f"，最后错误: {last_error}" if last_error else ""
         raise ElementNotFoundError(f"元素未找到（已尝试 {len(candidates)} 个候选）: {candidates}{detail}")
 
-    def click(self, selector: Union[str, List[str]], timeout: int = 10) -> str:
+    def click(self, selector: Union[str, List[str]], timeout: int = 10, frame: Union[str, int, None] = None) -> str:
         """
-        点击元素。selector 可为单个选择器或候选列表（自愈回退）。
+        点击元素。selector 可为单个选择器或候选列表（自愈回退）；frame 可指定 iframe。
 
         Returns:
             实际命中的选择器
         """
-        element, used, _ = self._find_element(selector, timeout=timeout)
+        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
         try:
             element.click()
         except Exception as e:
             raise ElementNotFoundError(f"点击元素失败: {used}, 错误: {str(e)}")
         return used
 
-    def input(self, selector: Union[str, List[str]], text: str, timeout: int = 10, clear: bool = True) -> str:
+    def input(self, selector: Union[str, List[str]], text: str, timeout: int = 10, clear: bool = True,
+              frame: Union[str, int, None] = None) -> str:
         """
-        输入文本。selector 可为单个选择器或候选列表（自愈回退）。
+        输入文本。selector 可为单个选择器或候选列表（自愈回退）；frame 可指定 iframe。
 
         Returns:
             实际命中的选择器
         """
-        element, used, _ = self._find_element(selector, timeout=timeout)
+        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
         try:
             if clear:
                 element.clear()
@@ -183,23 +205,86 @@ class BrowserAdapter:
             raise ElementNotFoundError(f"输入文本失败: {used}, 错误: {str(e)}")
         return used
 
-    def exists(self, selector: Union[str, List[str]], timeout: int = 3) -> bool:
+    def exists(self, selector: Union[str, List[str]], timeout: int = 3, frame: Union[str, int, None] = None) -> bool:
         """判断元素是否存在（任一候选命中即为存在）。"""
         try:
-            self._find_element(selector, timeout=timeout)
+            self._find_element(selector, timeout=timeout, frame=frame)
             return True
         except ElementNotFoundError:
             return False
 
-    def text(self, selector: Union[str, List[str]], timeout: int = 10) -> str:
+    def text(self, selector: Union[str, List[str]], timeout: int = 10, frame: Union[str, int, None] = None) -> str:
         """
-        获取元素文本内容。selector 可为单个选择器或候选列表（自愈回退）。
+        获取元素文本内容。selector 可为单个选择器或候选列表（自愈回退）；frame 可指定 iframe。
         """
-        element, used, _ = self._find_element(selector, timeout=timeout)
+        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
         try:
             return element.text
         except Exception as e:
             raise ElementNotFoundError(f"获取元素文本失败: {used}, 错误: {str(e)}")
+
+    def select_option(self, selector: Union[str, List[str]], by: str, value: Union[str, int],
+                      timeout: int = 10, frame: Union[str, int, None] = None) -> str:
+        """
+        操作 <select> 下拉框。
+
+        Args:
+            by: 'text' | 'value' | 'index'
+            value: 对应的选项文本/值/下标
+        """
+        element, used, _ = self._find_element(selector, timeout=timeout, frame=frame)
+        try:
+            sel = element.select
+            if by == "text":
+                sel.by_text(str(value))
+            elif by == "value":
+                sel.by_value(str(value))
+            elif by == "index":
+                sel.by_index(int(value))
+            else:
+                raise ElementNotFoundError(f"未知的下拉选择方式: {by}（应为 text/value/index）")
+        except ElementNotFoundError:
+            raise
+        except Exception as e:
+            raise ElementNotFoundError(f"下拉选择失败: {used} by={by} value={value}, 错误: {str(e)}")
+        return used
+
+    def switch_tab(self, target: Union[str, int]) -> None:
+        """
+        切换当前操作的标签页。
+
+        Args:
+            target: 'latest'（最新打开的标签页）或整数下标（从 0 开始）
+        """
+        page = self._ensure_page()
+        try:
+            if isinstance(target, str) and target.strip().lower() in ("latest", "new", "last"):
+                self._active = page.latest_tab
+            else:
+                self._active = page.get_tab(int(target))
+        except Exception as e:
+            raise ElementNotFoundError(f"切换标签页失败: {target}, 错误: {str(e)}")
+
+    def new_tab(self, url: Optional[str] = None) -> None:
+        """打开一个新标签页并切换为当前操作目标。"""
+        page = self._ensure_page()
+        try:
+            self._active = page.new_tab(url=url) if url else page.new_tab()
+        except Exception as e:
+            raise PageLoadTimeoutError(f"打开新标签页失败: {url}, 错误: {str(e)}")
+
+    def set_download_path(self, path: str) -> None:
+        """设置后续下载的保存目录。"""
+        page = self._ensure_page()
+        page.set.download_path(path)
+
+    def wait_download(self, timeout: int = 30) -> bool:
+        """等待下载完成。返回是否在超时内完成。"""
+        page = self._ensure_page()
+        try:
+            return bool(page.wait.downloads_done(timeout=timeout))
+        except Exception:
+            return False
     
     def wait(self, seconds: float) -> None:
         """
@@ -217,15 +302,14 @@ class BrowserAdapter:
         Args:
             path: 截图保存路径
         """
-        page = self._ensure_page()
-        page.get_screenshot(path=path)
+        self._target().get_screenshot(path=path)
     
     def pick_element_start(self) -> None:
         """
         向当前页面注入 JS，进入元素拾取模式。
         鼠标悬停会高亮元素，点击后将 CSS 选择器写入 window.__picked_selector。
         """
-        page = self._ensure_page()
+        page = self._target()
         js = """
 (function() {
     // 清除旧结果
@@ -342,7 +426,7 @@ class BrowserAdapter:
         读取页面上已拾取的元素选择器候选列表。
         有结果则清除并返回 {"selector": 首选, "selectors": [候选...]}，否则返回 None。
         """
-        page = self._ensure_page()
+        page = self._target()
         result = page.run_js("return window.__picked_selectors || null;")
         if result:
             page.run_js("window.__picked_selectors = null; window.__picked_selector = null;")
@@ -357,6 +441,7 @@ class BrowserAdapter:
         if self._page is not None:
             self._page.quit()
             self._page = None
+        self._active = None
     
     def __enter__(self):
         return self

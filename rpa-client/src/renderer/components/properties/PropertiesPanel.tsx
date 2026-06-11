@@ -172,7 +172,9 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
 
         {(selectedStep.type === 'click' ||
           selectedStep.type === 'input' ||
-          selectedStep.type === 'extract') && (
+          selectedStep.type === 'extract' ||
+          selectedStep.type === 'select' ||
+          selectedStep.type === 'download') && (
           <div className="space-y-1">
             <label className="block text-sm font-medium text-gray-700">选择器</label>
             <div className="flex gap-2">
@@ -242,6 +244,13 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
             >
               ＋ 添加候选选择器
             </button>
+
+            <Input
+              label="iframe 定位（可选）"
+              value={selectedStep.frame || ''}
+              onChange={(e) => handleUpdate({ frame: e.target.value || undefined })}
+              placeholder="iframe 的选择器或下标，留空表示主文档"
+            />
           </div>
         )}
 
@@ -252,6 +261,66 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
             onChange={(e) => handleUpdate({ value: e.target.value })}
             placeholder="要输入的文本..."
             rows={3}
+          />
+        )}
+
+        {/* SELECT 下拉选择配置 */}
+        {selectedStep.type === 'select' && (
+          <>
+            <Select
+              label="选择方式"
+              value={selectedStep.by || 'text'}
+              onChange={(e) => handleUpdate({ by: e.target.value as 'text' | 'value' | 'index' })}
+            >
+              <option value="text">按可见文本</option>
+              <option value="value">按 value 属性</option>
+              <option value="index">按下标（从 0 开始）</option>
+            </Select>
+            <Input
+              label="选项值"
+              value={selectedStep.value || ''}
+              onChange={(e) => handleUpdate({ value: e.target.value })}
+              placeholder={selectedStep.by === 'index' ? '例如: 2' : '要选择的选项'}
+            />
+          </>
+        )}
+
+        {/* SWITCH_TAB 标签页切换配置 */}
+        {selectedStep.type === 'switch_tab' && (
+          <>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={!!selectedStep.new_tab}
+                onChange={(e) => handleUpdate({ new_tab: e.target.checked })}
+              />
+              打开新标签页
+            </label>
+            {selectedStep.new_tab ? (
+              <Input
+                label="新标签页地址（可选）"
+                value={selectedStep.url || ''}
+                onChange={(e) => handleUpdate({ url: e.target.value })}
+                placeholder="https://example.com，留空为空白页"
+              />
+            ) : (
+              <Input
+                label="目标标签页"
+                value={selectedStep.value || ''}
+                onChange={(e) => handleUpdate({ value: e.target.value })}
+                placeholder="latest（最新）或下标，如 0、1"
+              />
+            )}
+          </>
+        )}
+
+        {/* DOWNLOAD 文件下载配置 */}
+        {selectedStep.type === 'download' && (
+          <Input
+            label="下载保存目录（可选）"
+            value={selectedStep.save_path || ''}
+            onChange={(e) => handleUpdate({ save_path: e.target.value })}
+            placeholder="默认 downloads（限定在输出沙箱内）"
           />
         )}
 

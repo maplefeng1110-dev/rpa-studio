@@ -274,5 +274,90 @@ class TestRunHistory(unittest.TestCase):
         self.assertIsNone(self.hist.get_run("nope"))
 
 
+class TestBrowserScenarios(unittest.TestCase):
+    """测试下拉选择 / iframe 路由 / 标签页切换（用假 page，不启动真实浏览器）"""
+
+    class FakeSelect:
+        def __init__(self):
+            self.calls = []
+        def by_text(self, t, timeout=None):
+            self.calls.append(("text", t))
+        def by_value(self, v, timeout=None):
+            self.calls.append(("value", v))
+        def by_index(self, i, timeout=None):
+            self.calls.append(("index", i))
+
+    class FakeEle:
+        def __init__(self, tag="main"):
+            self.tag = tag
+            self.select = TestBrowserScenarios.FakeSelect()
+            self.text = "hi"
+        def click(self):
+            pass
+
+    class FakeFrame:
+        def __init__(self, ele):
+            self._ele = ele
+        def ele(self, sel, timeout=10):
+            return self._ele
+
+    class FakeTab:
+        def __init__(self, name):
+            self.name = name
+
+    class FakePage:
+        def __init__(self):
+            self.main_ele = TestBrowserScenarios.FakeEle("main")
+            self.frame_ele = TestBrowserScenarios.FakeEle("inframe")
+            self.latest_tab = TestBrowserScenarios.FakeTab("latest")
+            self._tabs = {0: TestBrowserScenarios.FakeTab("t0"), 1: TestBrowserScenarios.FakeTab("t1")}
+            self.new_url = "unset"
+        def ele(self, sel, timeout=10):
+            return self.main_ele
+        def get_frame(self, loc, timeout=None):
+            return TestBrowserScenarios.FakeFrame(self.frame_ele)
+        def get_tab(self, n):
+            return self._tabs[n]
+        def new_tab(self, url=None):
+            self.new_url = url
+            return TestBrowserScenarios.FakeTab("new")
+
+    def _adapter(self):
+        a = BrowserAdapter()
+        a._page = TestBrowserScenarios.FakePage()
+        return a
+
+    def test_select_by_text(self):
+        a = self._adapter()
+        a.select_option("#sel", by="text", value="北京")
+        self.assertIn(("text", "北京"), a._page.main_ele.select.calls)
+
+    def test_select_by_index(self):
+        a = self._adapter()
+        a.select_option("#sel", by="index", value="2")
+        self.assertIn(("index", 2), a._page.main_ele.select.calls)
+
+    def test_iframe_routing(self):
+        a = self._adapter()
+        # 不带 frame -> 主文档元素；带 frame -> iframe 内元素
+        ele_main, _, _ = a._find_element("#x")
+        ele_frame, _, _ = a._find_element("#x", frame="#myframe")
+        self.assertEqual(ele_main.tag, "main")
+        self.assertEqual(ele_frame.tag, "inframe")
+
+    def test_switch_tab_latest_and_index(self):
+        a = self._adapter()
+        a.switch_tab("latest")
+        self.assertEqual(a._active.name, "latest")
+        a.switch_tab(1)
+        self.assertEqual(a._active.name, "t1")
+
+    def test_new_tab_sets_active(self):
+        a = self._adapter()
+        a.new_tab("https://example.com")
+        self.assertEqual(a._active.name, "new")
+        self.assertEqual(a._page.new_url, "https://example.com")
+
+
 if __name__ == "__main__":
     unittest.main()

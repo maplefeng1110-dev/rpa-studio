@@ -424,7 +424,8 @@ async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
 @app.post("/validate", dependencies=[Depends(verify_token)])
 async def validate_flow(flow: FlowDefinition) -> Dict[str, Any]:
     """验证 Flow 定义"""
-    valid_step_types = {"open", "click", "input", "wait", "extract", "if", "loop"}
+    valid_step_types = {"open", "click", "input", "wait", "extract", "if", "loop",
+                        "select", "switch_tab", "download"}
     errors: List[str] = []
 
     for i, step in enumerate(flow.steps):
@@ -485,7 +486,28 @@ async def get_step_types() -> Dict[str, Any]:
                 "name": "提取内容",
                 "description": "提取元素内容并保存",
                 "required_fields": ["selector"],
-                "optional_fields": ["save_path", "context_key", "timeout", "on_fail"]
+                "optional_fields": ["save_path", "context_key", "timeout", "on_fail", "frame"]
+            },
+            {
+                "type": "select",
+                "name": "下拉选择",
+                "description": "操作 <select> 下拉框，按文本/值/下标选择",
+                "required_fields": ["selector", "value"],
+                "optional_fields": ["by", "timeout", "on_fail", "frame"]
+            },
+            {
+                "type": "switch_tab",
+                "name": "切换标签页",
+                "description": "切换当前操作的标签页或打开新标签页",
+                "required_fields": [],
+                "optional_fields": ["value", "new_tab", "url", "on_fail"]
+            },
+            {
+                "type": "download",
+                "name": "文件下载",
+                "description": "点击触发下载并等待完成（保存到沙箱目录）",
+                "required_fields": ["selector"],
+                "optional_fields": ["save_path", "timeout", "on_fail", "frame"]
             }
         ]
     }

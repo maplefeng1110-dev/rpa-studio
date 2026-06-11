@@ -34,7 +34,7 @@ class ClickStep(BaseStep):
             raise StepError(self.step_type, "selector 不能为空")
 
         try:
-            used = browser.click(candidates, timeout=self.timeout)
+            used = browser.click(candidates, timeout=self.timeout, frame=self.frame)
             return StepResult(
                 success=True,
                 message=f"成功点击元素: {used}"

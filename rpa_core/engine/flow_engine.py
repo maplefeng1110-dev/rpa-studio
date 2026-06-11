@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 from ..browser import BrowserAdapter
-from ..steps import BaseStep, StepResult, StepError, OpenStep, ClickStep, InputStep, WaitStep, ExtractStep
+from ..steps import (
+    BaseStep, StepResult, StepError, OpenStep, ClickStep, InputStep, WaitStep, ExtractStep,
+    SelectStep, SwitchTabStep, DownloadStep,
+)
 from ..utils import RuntimeContext, setup_logger, get_output_base
 
 
@@ -99,6 +102,9 @@ STEP_REGISTRY: Dict[str, Type[BaseStep]] = {
     "input": InputStep,
     "wait": WaitStep,
     "extract": ExtractStep,
+    "select": SelectStep,
+    "switch_tab": SwitchTabStep,
+    "download": DownloadStep,
 }
 
 

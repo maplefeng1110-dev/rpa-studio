@@ -43,8 +43,8 @@ class ExtractStep(BaseStep):
             raise StepError(self.step_type, "selector 不能为空")
 
         try:
-            # 提取文本（支持候选选择器自愈回退）
-            text = browser.text(candidates, timeout=self.timeout)
+            # 提取文本（支持候选选择器自愈回退 + iframe）
+            text = browser.text(candidates, timeout=self.timeout, frame=self.frame)
             
             # 存储到 Context
             context.set(self.context_key, text)
