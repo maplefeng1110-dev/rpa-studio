@@ -9,6 +9,7 @@ __pycache__/
 # 运行产物
 rpa_core/logs/
 rpa_core/output/
+rpa_core/data/
 .rpa_token
 
 # Node / Electron

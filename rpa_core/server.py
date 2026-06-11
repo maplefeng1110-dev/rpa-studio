@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from rpa_core import FlowEngine, ExecutionResult
 from rpa_core.browser import BrowserAdapter
+from rpa_core.storage import RunHistory
 from rpa_core.utils import setup_logger
 
 # 配置日志
@@ -105,6 +106,7 @@ class ExecutionLogEntry(BaseModel):
     duration_ms: float
     success: bool
     message: str
+    screenshot: Optional[str] = None
 
 
 class ExecuteResponse(BaseModel):
@@ -116,6 +118,7 @@ class ExecuteResponse(BaseModel):
     context: Dict[str, Any]
     execution_log: List[ExecutionLogEntry]
     error: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -140,6 +143,17 @@ _executor = ThreadPoolExecutor(max_workers=5)
 _shared_browser: Optional[BrowserAdapter] = None
 _browser_init_lock = threading.Lock()
 _execution_lock = threading.Lock()
+
+# 运行历史（SQLite）
+_history = RunHistory()
+
+
+def _record_run(result: ExecutionResult) -> None:
+    """把一次执行结果写入运行历史；记录失败不影响主流程。"""
+    try:
+        _history.record(result)
+    except Exception as e:
+        logger.error(f"写入运行历史失败: {str(e)}")
 
 
 def get_shared_browser() -> BrowserAdapter:
@@ -327,6 +341,7 @@ async def ws_execute_flow(websocket: WebSocket, token: Optional[str] = None):
         # 执行完成，发送结果
         if not future.cancelled():
             result = await future
+            _record_run(result)
             await websocket.send_json({
                 "type": "result",
                 "data": {
@@ -335,7 +350,8 @@ async def ws_execute_flow(websocket: WebSocket, token: Optional[str] = None):
                     "executed_steps": result.executed_steps,
                     "total_steps": result.total_steps,
                     "error": result.error,
-                    "context": result.context
+                    "context": result.context,
+                    "run_id": result.run_id
                 }
             })
 
@@ -376,13 +392,16 @@ async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
             _executor, engine.execute, flow_dict, request.initial_context
         )
 
+        # 写入运行历史
+        _record_run(result)
+
         # 转换执行日志
         execution_log = [
             ExecutionLogEntry(**log_entry)
             for log_entry in result.execution_log
         ]
 
-        logger.info(f"执行完成: success={result.success}, executed={result.executed_steps}/{result.total_steps}")
+        logger.info(f"执行完成: run_id={result.run_id}, success={result.success}, executed={result.executed_steps}/{result.total_steps}")
 
         return ExecuteResponse(
             success=result.success,
@@ -391,7 +410,8 @@ async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
             total_steps=result.total_steps,
             context=result.context,
             execution_log=execution_log,
-            error=result.error
+            error=result.error,
+            run_id=result.run_id
         )
 
     except Exception as e:
@@ -469,6 +489,26 @@ async def get_step_types() -> Dict[str, Any]:
             }
         ]
     }
+
+
+# ============================================
+# 运行历史
+# ============================================
+
+@app.get("/runs", dependencies=[Depends(verify_token)])
+async def list_runs(limit: int = 50) -> Dict[str, Any]:
+    """列出最近的运行记录（摘要）。"""
+    limit = max(1, min(limit, 500))
+    return {"runs": _history.list_runs(limit=limit)}
+
+
+@app.get("/runs/{run_id}", dependencies=[Depends(verify_token)])
+async def get_run(run_id: str) -> Dict[str, Any]:
+    """获取单次运行详情（含完整步骤日志与失败截图路径）。"""
+    run = _history.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    return run
 
 
 # ============================================

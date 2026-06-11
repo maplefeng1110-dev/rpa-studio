@@ -52,6 +52,7 @@ export interface ExecutionLogEntry {
   duration_ms: number;
   success: boolean;
   message: string;
+  screenshot?: string | null;  // 失败时自动截图的本地路径
 }
 
 // 执行响应

@@ -228,5 +228,51 @@ class TestSelfHealingFind(unittest.TestCase):
         self.assertEqual(used, "#solo")
 
 
+class TestRunHistory(unittest.TestCase):
+    """测试运行历史 SQLite 存储"""
+
+    def setUp(self):
+        import tempfile, os
+        self.db = os.path.join(tempfile.gettempdir(), "rpa_hist_unittest.db")
+        if os.path.exists(self.db):
+            os.remove(self.db)
+        from rpa_core.storage import RunHistory
+        self.hist = RunHistory(db_path=self.db)
+
+    def tearDown(self):
+        import os
+        if os.path.exists(self.db):
+            os.remove(self.db)
+
+    class _FakeResult:
+        def __init__(self, run_id, success):
+            self.run_id = run_id
+            self.flow_name = "demo"
+            self.success = success
+            self.executed_steps = 1
+            self.total_steps = 2
+            self.error = None if success else "boom"
+            self.started_at = "2026-06-11T10:00:00"
+            self.finished_at = "2026-06-11T10:00:01"
+            self.execution_log = [
+                {"step_index": 0, "step_type": "click", "success": success,
+                 "message": "x", "screenshot": None if success else "runs/r/step_1_fail.png"},
+            ]
+
+    def test_record_and_get(self):
+        self.hist.record(self._FakeResult("r1", False))
+        detail = self.hist.get_run("r1")
+        self.assertEqual(detail["flow_name"], "demo")
+        self.assertEqual(detail["success"], 0)
+        self.assertEqual(detail["execution_log"][0]["screenshot"], "runs/r/step_1_fail.png")
+
+    def test_list_orders_and_missing(self):
+        self.hist.record(self._FakeResult("r1", True))
+        self.hist.record(self._FakeResult("r2", False))
+        runs = self.hist.list_runs()
+        self.assertEqual(len(runs), 2)
+        self.assertIsNone(self.hist.get_run("nope"))
+
+
 if __name__ == "__main__":
     unittest.main()

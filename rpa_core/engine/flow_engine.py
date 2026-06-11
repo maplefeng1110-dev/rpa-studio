@@ -7,13 +7,14 @@ import logging
 import operator
 import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 from ..browser import BrowserAdapter
 from ..steps import BaseStep, StepResult, StepError, OpenStep, ClickStep, InputStep, WaitStep, ExtractStep
-from ..utils import RuntimeContext, setup_logger
+from ..utils import RuntimeContext, setup_logger, get_output_base
 
 
 def eval_condition(condition: str, context: RuntimeContext) -> bool:
@@ -122,7 +123,10 @@ class ExecutionResult:
         total_steps: int,
         context: Dict[str, Any],
         execution_log: List[Dict[str, Any]],
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        run_id: Optional[str] = None,
+        started_at: Optional[str] = None,
+        finished_at: Optional[str] = None
     ):
         self.success = success
         self.flow_name = flow_name
@@ -131,6 +135,9 @@ class ExecutionResult:
         self.context = context
         self.execution_log = execution_log
         self.error = error
+        self.run_id = run_id
+        self.started_at = started_at
+        self.finished_at = finished_at
     
     def __repr__(self) -> str:
         status = "成功" if self.success else "失败"
@@ -159,7 +166,11 @@ class FlowEngine:
         self._context: Optional[RuntimeContext] = None
         self._execution_log: List[Dict[str, Any]] = []
         self.log_callback = log_callback
-        
+
+        # 运行标识与时间（每次 execute 重置）
+        self.run_id: Optional[str] = None
+        self.started_at: Optional[str] = None
+
         # 控制状态
         self._is_paused = False
         self._is_stopped = False
@@ -201,6 +212,24 @@ class FlowEngine:
         if self._browser is None:
             self._browser = BrowserAdapter()
         return self._browser
+
+    def _capture_failure_screenshot(self, index: int) -> Optional[str]:
+        """
+        步骤失败时抓取当前页面截图，存到 <output>/runs/<run_id>/。
+        截图失败（如浏览器尚未启动）不应影响主流程，返回 None。
+        """
+        try:
+            if self._browser is None or self._browser._page is None:
+                return None
+            run_dir = get_output_base() / "runs" / (self.run_id or "unknown")
+            run_dir.mkdir(parents=True, exist_ok=True)
+            path = run_dir / f"step_{index + 1}_fail.png"
+            self._browser.screenshot(str(path))
+            logger.info(f"[Step {index+1}] 已保存失败截图: {path}")
+            return str(path)
+        except Exception as e:
+            logger.warning(f"[Step {index+1}] 失败截图抓取失败: {str(e)}")
+            return None
     
     def load_flow(self, flow_path: str) -> Dict[str, Any]:
         """
@@ -244,52 +273,45 @@ class FlowEngine:
         """
         flow_name = flow.get("name", "unnamed_flow")
         steps = flow.get("steps", [])
-        
-        logger.info(f"开始执行 Flow: {flow_name}, 共 {len(steps)} 个步骤")
-        
-        # 初始化上下文和计数器
+
+        # 初始化运行标识、上下文和计数器
+        self.run_id = str(uuid.uuid4())
+        self.started_at = datetime.now().isoformat()
         self._context = RuntimeContext(initial_context)
         self._execution_log = []
         self._step_counter = 0
         self._executed_step_count = 0
-        
+
+        logger.info(f"开始执行 Flow: {flow_name} (run_id={self.run_id}), 共 {len(steps)} 个步骤")
+
         browser = self._ensure_browser()
-        
-        try:
-            success = self._execute_step_list(steps, browser)
-            
-            if not success:
-                return ExecutionResult(
-                    success=False,
-                    flow_name=flow_name,
-                    executed_steps=self._executed_step_count,
-                    total_steps=self._step_counter,
-                    context=self._context.to_dict(),
-                    execution_log=self._execution_log,
-                    error="Flow 执行过程中有步骤失败"
-                )
-            
-            logger.info(f"Flow {flow_name} 执行完成")
+
+        def _build_result(success: bool, error: Optional[str], total_override: Optional[int] = None) -> ExecutionResult:
             return ExecutionResult(
-                success=True,
+                success=success,
                 flow_name=flow_name,
                 executed_steps=self._executed_step_count,
-                total_steps=self._step_counter,
-                context=self._context.to_dict(),
-                execution_log=self._execution_log
-            )
-            
-        except FlowAbortError as e:
-            logger.error(f"Flow 中止: {str(e)}")
-            return ExecutionResult(
-                success=False,
-                flow_name=flow_name,
-                executed_steps=self._executed_step_count,
-                total_steps=max(self._step_counter, 1),
+                total_steps=total_override if total_override is not None else self._step_counter,
                 context=self._context.to_dict(),
                 execution_log=self._execution_log,
-                error=str(e)
+                error=error,
+                run_id=self.run_id,
+                started_at=self.started_at,
+                finished_at=datetime.now().isoformat(),
             )
+
+        try:
+            success = self._execute_step_list(steps, browser)
+
+            if not success:
+                return _build_result(False, "Flow 执行过程中有步骤失败")
+
+            logger.info(f"Flow {flow_name} 执行完成")
+            return _build_result(True, None)
+
+        except FlowAbortError as e:
+            logger.error(f"Flow 中止: {str(e)}")
+            return _build_result(False, str(e), total_override=max(self._step_counter, 1))
 
     def _execute_step_list(self, steps: List[Dict[str, Any]], browser: BrowserAdapter) -> bool:
         """递归执行步骤列表"""
@@ -379,9 +401,11 @@ class FlowEngine:
                     continue
                 
                 logger.warning(f"[Step {index+1}] 执行失败: {str(e)}")
+                screenshot = self._capture_failure_screenshot(index)
                 self._log_step_execution(
-                    index, step_type, start_time, 
-                    StepResult(success=False, message=str(e))
+                    index, step_type, start_time,
+                    StepResult(success=False, message=str(e)),
+                    screenshot=screenshot
                 )
                 return self._handle_failure(index, step_type, on_fail, str(e))
             except Exception as e:
@@ -390,11 +414,13 @@ class FlowEngine:
                     logger.warning(f"[Step {index+1}] 系统异常，正在进行第 {attempt+1}/{max_retries} 次重试... 错误: {str(e)}")
                     time.sleep(retry_delay)
                     continue
-                    
+
                 logger.warning(f"[Step {index+1}] 系统异常: {str(e)}")
+                screenshot = self._capture_failure_screenshot(index)
                 self._log_step_execution(
-                    index, step_type, start_time, 
-                    StepResult(success=False, message=str(e))
+                    index, step_type, start_time,
+                    StepResult(success=False, message=str(e)),
+                    screenshot=screenshot
                 )
                 return self._handle_failure(index, step_type, on_fail, str(e))
 
@@ -523,11 +549,12 @@ class FlowEngine:
             raise FlowAbortError(f"Step {index+1} ({step_type}) 失败: {error_msg}")
     
     def _log_step_execution(
-        self, 
-        index: int, 
-        step_type: str, 
-        start_time: datetime, 
-        result: StepResult
+        self,
+        index: int,
+        step_type: str,
+        start_time: datetime,
+        result: StepResult,
+        screenshot: Optional[str] = None
     ) -> None:
         """记录 Step 执行日志"""
         end_time = datetime.now()
@@ -538,7 +565,8 @@ class FlowEngine:
             "end_time": end_time.isoformat(),
             "duration_ms": (end_time - start_time).total_seconds() * 1000,
             "success": result.success,
-            "message": result.message
+            "message": result.message,
+            "screenshot": screenshot
         }
         self._execution_log.append(log_entry)
         if self.log_callback:

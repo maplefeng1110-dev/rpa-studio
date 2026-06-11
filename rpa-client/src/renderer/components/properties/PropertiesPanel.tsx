@@ -102,6 +102,48 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
     }
   };
 
+  // ===== 候选选择器（自愈回退）管理 =====
+  const candidates: string[] = selectedStep.selectors || [];
+
+  // 统一提交：保持 selector 与 selectors[0] 同步；列表为空则清空 selectors
+  const commitSelectors = (next: string[]) => {
+    handleUpdate({
+      selectors: next.length > 0 ? next : undefined,
+      selector: next.length > 0 ? next[0] : selectedStep.selector,
+    });
+  };
+
+  // 编辑首选选择器输入框：有候选时同步更新 selectors[0]
+  const setPrimarySelector = (val: string) => {
+    if (candidates.length > 0) {
+      const next = [...candidates];
+      next[0] = val;
+      commitSelectors(next);
+    } else {
+      handleUpdate({ selector: val });
+    }
+  };
+
+  const addCandidate = () => {
+    const base =
+      candidates.length > 0 ? candidates : selectedStep.selector ? [selectedStep.selector] : [];
+    commitSelectors([...base, '']);
+  };
+  const updateCandidate = (i: number, val: string) => {
+    const next = [...candidates];
+    next[i] = val;
+    commitSelectors(next);
+  };
+  const removeCandidate = (i: number) => {
+    commitSelectors(candidates.filter((_, idx) => idx !== i));
+  };
+  const promoteCandidate = (i: number) => {
+    if (i <= 0) return;
+    const next = [...candidates];
+    [next[i - 1], next[i]] = [next[i], next[i - 1]];
+    commitSelectors(next);
+  };
+
   return (
     <div className="h-full flex flex-col bg-white">
       {/* 头部 */}
@@ -137,8 +179,8 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
               <input
                 className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
                 value={selectedStep.selector || ''}
-                onChange={(e) => handleUpdate({ selector: e.target.value })}
-                placeholder="#id, .class, [name='value']"
+                onChange={(e) => setPrimarySelector(e.target.value)}
+                placeholder="#id / css:.class / xpath://.. / text:登录"
               />
               <Button
                 type="button"
@@ -150,6 +192,56 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
                 {isPicking ? '🎯 拾取中...' : '🎯 拾取'}
               </Button>
             </div>
+
+            {/* 候选选择器：运行时按顺序自愈回退 */}
+            {candidates.length > 0 && (
+              <div className="mt-2 space-y-1.5 rounded-lg border border-gray-100 bg-gray-50 p-2">
+                <p className="text-xs text-gray-500">
+                  候选选择器（失败时按 #1→#{candidates.length} 顺序自愈回退）
+                </p>
+                {candidates.map((c, i) => (
+                  <div key={i} className="flex items-center gap-1">
+                    <span
+                      className={`w-4 text-center text-xs ${
+                        i === 0 ? 'font-semibold text-blue-600' : 'text-gray-400'
+                      }`}
+                    >
+                      {i + 1}
+                    </span>
+                    <input
+                      className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+                      value={c}
+                      onChange={(e) => updateCandidate(i, e.target.value)}
+                      placeholder="css:.x / xpath://.. / text:登录"
+                    />
+                    <button
+                      type="button"
+                      title="提升优先级"
+                      disabled={i === 0}
+                      onClick={() => promoteCandidate(i)}
+                      className="px-1 text-gray-400 hover:text-blue-600 disabled:opacity-30"
+                    >
+                      ▲
+                    </button>
+                    <button
+                      type="button"
+                      title="删除候选"
+                      onClick={() => removeCandidate(i)}
+                      className="px-1 text-gray-400 hover:text-red-600"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={addCandidate}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              ＋ 添加候选选择器
+            </button>
           </div>
         )}
 

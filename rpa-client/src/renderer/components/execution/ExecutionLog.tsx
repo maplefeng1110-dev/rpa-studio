@@ -76,6 +76,11 @@ export const ExecutionLog: React.FC<ExecutionLogProps> = () => {
                         </span>
                       </div>
                       <div className="text-gray-600 mt-1 text-xs break-all leading-relaxed">{log.message}</div>
+                      {log.screenshot && (
+                        <div className="text-[11px] text-gray-400 mt-1 break-all" title={log.screenshot}>
+                          📷 失败截图：{log.screenshot}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
