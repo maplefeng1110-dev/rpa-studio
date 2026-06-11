@@ -5,7 +5,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState, AppDispatch } from '../../store';
 import type { FlowDefinition } from '../../types/flow';
-import { createFlow, clearDirty, setFlow, setFlows } from '../../store/flowSlice';
+import { createFlow, clearDirty, setFlow, setFlows, updateFlowInfo } from '../../store/flowSlice';
 import { Button } from '../common/Button';
 import { SecretsModal } from '../secrets/SecretsModal';
 import { useIpc } from '../../hooks/useIpc';
@@ -71,6 +71,31 @@ export const Header: React.FC<HeaderProps> = () => {
     }
   };
 
+  // 从文件导入（原生打开对话框；导入后赋新 id 并落盘）
+  const handleImport = async () => {
+    const res = await flow.import();
+    if (res?.success && res.flow) {
+      const saved = await flow.save(res.flow);
+      if (saved?.success) {
+        dispatch(setFlow(res.flow));
+        await refreshFlows();
+      }
+    }
+  };
+
+  // 导出当前流程到文件（原生保存对话框，默认按流程名命名）
+  const handleExport = async () => {
+    if (currentFlow) await flow.export(currentFlow);
+  };
+
+  // 删除一个已保存流程
+  const handleDeleteFlow = async (id: string, name: string) => {
+    if (!confirm(`确定删除流程「${name || '未命名'}」？`)) return;
+    await flow.delete(id);
+    if (currentFlow?.id === id) dispatch(createFlow('新流程'));
+    await refreshFlows();
+  };
+
   const handleExecute = () => {
     if (currentFlow) {
       executeFlow(currentFlow);
@@ -87,8 +112,14 @@ export const Header: React.FC<HeaderProps> = () => {
         <div className="h-6 w-px bg-gray-300" />
         {currentFlow && (
           <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-600">{currentFlow.name}</span>
-            {isDirty && <span className="text-xs text-orange-500">● 未保存</span>}
+            <input
+              className="text-sm text-gray-700 font-medium bg-transparent border border-transparent hover:border-gray-300 focus:border-blue-400 focus:bg-white rounded px-1.5 py-0.5 focus:outline-none w-44"
+              value={currentFlow.name}
+              title="点击编辑流程名称"
+              placeholder="未命名流程"
+              onChange={(e) => dispatch(updateFlowInfo({ name: e.target.value }))}
+            />
+            {isDirty && <span className="text-xs text-orange-500 whitespace-nowrap">● 未保存</span>}
           </div>
         )}
       </div>
@@ -130,20 +161,28 @@ export const Header: React.FC<HeaderProps> = () => {
                   <div className="px-3 py-3 text-sm text-gray-400 text-center">暂无已保存的流程</div>
                 ) : (
                   flows.map((f) => (
-                    <button
+                    <div
                       key={f.id}
-                      onClick={() => handleOpenFlow(f.id)}
-                      className={`w-full text-left px-3 py-2 hover:bg-blue-50 text-sm ${
+                      className={`group flex items-center justify-between px-3 py-2 hover:bg-blue-50 ${
                         currentFlow?.id === f.id ? 'bg-blue-50' : ''
                       }`}
                     >
-                      <div className="font-medium text-gray-800 truncate">{f.name || '未命名流程'}</div>
-                      <div className="text-xs text-gray-400">
-                        {f.updatedAt ? new Date(f.updatedAt).toLocaleString() : ''}
-                        {' · '}
-                        {(f.steps?.length ?? 0)} 步
-                      </div>
-                    </button>
+                      <button onClick={() => handleOpenFlow(f.id)} className="flex-1 text-left text-sm min-w-0">
+                        <div className="font-medium text-gray-800 truncate">{f.name || '未命名流程'}</div>
+                        <div className="text-xs text-gray-400">
+                          {f.updatedAt ? new Date(f.updatedAt).toLocaleString() : ''}
+                          {' · '}
+                          {(f.steps?.length ?? 0)} 步
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => handleDeleteFlow(f.id, f.name)}
+                        title="删除"
+                        className="ml-2 text-gray-300 hover:text-red-600 opacity-0 group-hover:opacity-100"
+                      >
+                        🗑
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -153,6 +192,12 @@ export const Header: React.FC<HeaderProps> = () => {
 
         <Button variant="secondary" onClick={handleSave} disabled={!currentFlow || !isDirty || status === 'running' || status === 'paused'}>
           保存
+        </Button>
+        <Button variant="secondary" onClick={handleImport} disabled={status === 'running' || status === 'paused'}>
+          导入
+        </Button>
+        <Button variant="secondary" onClick={handleExport} disabled={!currentFlow || status === 'running' || status === 'paused'}>
+          导出
         </Button>
 
         <Button variant="secondary" onClick={() => setSecretsOpen(true)}>
