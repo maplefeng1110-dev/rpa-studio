@@ -3,7 +3,7 @@ Runtime Context 模块
 负责存储流程运行期间的共享状态，包括变量传递、Step执行结果等
 """
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 class RuntimeContext:
@@ -11,10 +11,22 @@ class RuntimeContext:
     运行时上下文容器
     - 存储变量和运行状态
     - 支持模板变量渲染 {{variable_name}}
+    - 支持凭据引用 {{secret:name}}：在渲染时从保险库即时取值，
+      明文绝不写入 _data，因此不会进入运行历史/上下文快照/日志
     """
-    
-    def __init__(self, initial_data: Optional[Dict[str, Any]] = None):
+
+    def __init__(
+        self,
+        initial_data: Optional[Dict[str, Any]] = None,
+        secret_resolver: Optional[Callable[[str], Optional[str]]] = None,
+    ):
         self._data: Dict[str, Any] = initial_data.copy() if initial_data else {}
+        self._secret_resolver = secret_resolver
+
+    def _resolve_secret(self, name: str) -> Optional[str]:
+        if self._secret_resolver is None:
+            return None
+        return self._secret_resolver(name)
     
     def get(self, key: str, default: Any = None) -> Any:
         """获取变量值"""
@@ -36,25 +48,32 @@ class RuntimeContext:
         """
         if not template or not isinstance(template, str):
             return template
-        
-        # 检查是否为单一变量精确匹配
-        exact_pattern = r'^\{\{(\w+)\}\}$'
-        exact_match = re.match(exact_pattern, template)
+
+        # 精确匹配凭据引用 {{secret:name}}（须先于普通变量判断，因含冒号）
+        secret_exact = re.match(r'^\{\{secret:(\w+)\}\}$', template)
+        if secret_exact:
+            val = self._resolve_secret(secret_exact.group(1))
+            return val if val is not None else template
+
+        # 精确匹配单一变量 {{name}}，保留原始类型
+        exact_match = re.match(r'^\{\{(\w+)\}\}$', template)
         if exact_match:
             key = exact_match.group(1)
             if key in self._data:
                 return self._data[key]
             return template
-        
-        # 否则作为普通字符串替换
-        pattern = r'\{\{(\w+)\}\}'
-        
+
+        # 内联替换：同时支持 {{name}} 与 {{secret:name}}
         def replace(match):
-            key = match.group(1)
+            is_secret = match.group(1)
+            key = match.group(2)
+            if is_secret:
+                val = self._resolve_secret(key)
+                return str(val) if val is not None else match.group(0)
             value = self._data.get(key, match.group(0))
             return str(value) if value is not None else match.group(0)
-        
-        return re.sub(pattern, replace, template)
+
+        return re.sub(r'\{\{(secret:)?(\w+)\}\}', replace, template)
     
     def to_dict(self) -> Dict[str, Any]:
         """返回上下文数据的副本"""

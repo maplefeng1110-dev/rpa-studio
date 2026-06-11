@@ -496,5 +496,82 @@ class TestScheduler(unittest.TestCase):
         self.assertTrue(self.store.get(job["id"])["last_status"].startswith("error"))
 
 
+class TestSecretVault(unittest.TestCase):
+    """测试加密凭据保险库"""
+
+    def setUp(self):
+        import tempfile, os
+        from cryptography.fernet import Fernet
+        from rpa_core.vault import SecretVault
+        self.db = os.path.join(tempfile.gettempdir(), "rpa_vault_unittest.db")
+        if os.path.exists(self.db):
+            os.remove(self.db)
+        self.key = Fernet.generate_key()
+        self.vault = SecretVault(db_path=self.db, key=self.key)
+
+    def tearDown(self):
+        import os
+        if os.path.exists(self.db):
+            os.remove(self.db)
+
+    def test_set_get_roundtrip(self):
+        self.vault.set("login_pw", "s3cr3t!")
+        self.assertEqual(self.vault.get("login_pw"), "s3cr3t!")
+
+    def test_stored_ciphertext_is_not_plaintext(self):
+        import sqlite3
+        self.vault.set("api", "PLAINTEXT_VALUE")
+        with sqlite3.connect(self.db) as c:
+            blob = c.execute("SELECT ciphertext FROM secrets WHERE name='api'").fetchone()[0]
+        self.assertNotIn(b"PLAINTEXT_VALUE", blob)
+
+    def test_list_names_only(self):
+        self.vault.set("a", "1")
+        self.vault.set("b", "2")
+        names = [s["name"] for s in self.vault.list_names()]
+        self.assertEqual(sorted(names), ["a", "b"])
+
+    def test_delete_and_missing(self):
+        self.vault.set("x", "y")
+        self.assertTrue(self.vault.delete("x"))
+        self.assertIsNone(self.vault.get("x"))
+        self.assertFalse(self.vault.delete("nope"))
+
+    def test_wrong_key_fails(self):
+        from cryptography.fernet import Fernet
+        from rpa_core.vault import SecretVault
+        self.vault.set("k", "v")
+        other = SecretVault(db_path=self.db, key=Fernet.generate_key())
+        with self.assertRaises(ValueError):
+            other.get("k")
+
+
+class TestSecretInContext(unittest.TestCase):
+    """测试 {{secret:name}} 渲染，且明文不进入上下文快照"""
+
+    def _ctx(self):
+        secrets = {"pw": "TOPSECRET", "user": "alice"}
+        return RuntimeContext(
+            {"q": "hello"},
+            secret_resolver=lambda name: secrets.get(name),
+        )
+
+    def test_exact_secret(self):
+        self.assertEqual(self._ctx().render("{{secret:pw}}"), "TOPSECRET")
+
+    def test_inline_secret_and_var(self):
+        self.assertEqual(self._ctx().render("u={{secret:user}};q={{q}}"), "u=alice;q=hello")
+
+    def test_missing_secret_keeps_template(self):
+        self.assertEqual(self._ctx().render("{{secret:nope}}"), "{{secret:nope}}")
+
+    def test_secret_not_in_snapshot(self):
+        ctx = self._ctx()
+        _ = ctx.render("{{secret:pw}}")
+        # 明文绝不能出现在上下文快照里（即不会进入运行历史）
+        self.assertNotIn("TOPSECRET", str(ctx.to_dict()))
+        self.assertNotIn("pw", ctx.to_dict())
+
+
 if __name__ == "__main__":
     unittest.main()

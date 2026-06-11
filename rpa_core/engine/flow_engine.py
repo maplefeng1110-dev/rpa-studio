@@ -159,16 +159,18 @@ class FlowEngine:
     - 更新 Runtime Context
     """
     
-    def __init__(self, browser: Optional[BrowserAdapter] = None, log_callback=None):
+    def __init__(self, browser: Optional[BrowserAdapter] = None, log_callback=None, secret_resolver=None):
         """
         初始化流程引擎
-        
+
         Args:
             browser: 浏览器适配器实例，如果不提供则自动创建
             log_callback: 实时日志和进度回调函数，接收 Dict
+            secret_resolver: 凭据解析回调 name -> value，用于 {{secret:name}}
         """
         self._browser = browser
         self._owns_browser = browser is None
+        self._secret_resolver = secret_resolver
         self._context: Optional[RuntimeContext] = None
         self._execution_log: List[Dict[str, Any]] = []
         self.log_callback = log_callback
@@ -283,7 +285,7 @@ class FlowEngine:
         # 初始化运行标识、上下文和计数器
         self.run_id = str(uuid.uuid4())
         self.started_at = datetime.now().isoformat()
-        self._context = RuntimeContext(initial_context)
+        self._context = RuntimeContext(initial_context, secret_resolver=self._secret_resolver)
         self._execution_log = []
         self._step_counter = 0
         self._executed_step_count = 0

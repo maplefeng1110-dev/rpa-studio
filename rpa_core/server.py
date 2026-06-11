@@ -26,6 +26,7 @@ from rpa_core import FlowEngine, ExecutionResult
 from rpa_core.browser import BrowserAdapter
 from rpa_core.storage import RunHistory
 from rpa_core.scheduler import Scheduler, cron
+from rpa_core.vault import get_vault
 from rpa_core.utils import setup_logger
 
 # 配置日志
@@ -138,6 +139,12 @@ class ScheduleCreate(BaseModel):
     enabled: bool = Field(True, description="是否启用")
 
 
+class SecretSet(BaseModel):
+    """凭据写入模型（明文仅在写入时出现，绝不回读）"""
+    name: str = Field(..., description="凭据名，流程中用 {{secret:name}} 引用")
+    value: str = Field(..., description="凭据明文值（将被加密存储）")
+
+
 # ============================================
 # 全局状态
 #
@@ -158,6 +165,9 @@ _execution_lock = threading.Lock()
 # 运行历史（SQLite）
 _history = RunHistory()
 
+# 凭据保险库（加密）
+_vault = get_vault()
+
 
 def _record_run(result: ExecutionResult) -> None:
     """把一次执行结果写入运行历史；记录失败不影响主流程。"""
@@ -173,7 +183,7 @@ def _run_scheduled_flow(flow: Dict[str, Any], initial_context: Dict[str, Any]) -
     与手动执行共用同一把执行锁，确保不会两个流程同时驱动唯一的浏览器。
     """
     with _execution_lock:
-        engine = FlowEngine(browser=get_shared_browser())
+        engine = FlowEngine(browser=get_shared_browser(), secret_resolver=_vault.get)
         result = engine.execute(flow, initial_context)
         _record_run(result)
         return result
@@ -334,7 +344,7 @@ async def ws_execute_flow(websocket: WebSocket, token: Optional[str] = None):
 
         # 每次执行新建独立引擎：拥有自己的 Context / 计数器 / 暂停-停止标志
         loop = asyncio.get_running_loop()
-        engine = FlowEngine(browser=get_shared_browser())
+        engine = FlowEngine(browser=get_shared_browser(), secret_resolver=_vault.get)
         engine.log_callback = make_log_callback(websocket, loop)
 
         # 在线程池中执行流程
@@ -413,7 +423,7 @@ async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
         logger.info(f"收到执行请求: {flow_dict['name']}, {len(flow_dict['steps'])} 个步骤")
 
         # 每次执行新建独立引擎，避免并发串改状态；浏览器共享但已被锁串行化
-        engine = FlowEngine(browser=get_shared_browser())
+        engine = FlowEngine(browser=get_shared_browser(), secret_resolver=_vault.get)
 
         # 在线程池中执行，避免阻塞事件循环
         loop = asyncio.get_running_loop()
@@ -636,6 +646,32 @@ async def run_schedule_now(job_id: str) -> Dict[str, Any]:
     if not _scheduler.run_now(job_id):
         raise HTTPException(status_code=404, detail="定时任务不存在")
     return {"success": True, "message": "已入队，将尽快执行"}
+
+
+# ============================================
+# 凭据保险库
+# ============================================
+
+@app.post("/secrets", dependencies=[Depends(verify_token)])
+async def set_secret(req: SecretSet) -> Dict[str, Any]:
+    """新增或更新一个加密凭据。流程中用 {{secret:name}} 引用，明文不会回读。"""
+    if not req.name:
+        raise HTTPException(status_code=400, detail="凭据名不能为空")
+    _vault.set(req.name, req.value)
+    return {"success": True, "name": req.name}
+
+
+@app.get("/secrets", dependencies=[Depends(verify_token)])
+async def list_secrets() -> Dict[str, Any]:
+    """列出凭据名称（绝不返回明文）。"""
+    return {"secrets": _vault.list_names()}
+
+
+@app.delete("/secrets/{name}", dependencies=[Depends(verify_token)])
+async def delete_secret(name: str) -> Dict[str, Any]:
+    if not _vault.delete(name):
+        raise HTTPException(status_code=404, detail="凭据不存在")
+    return {"success": True}
 
 
 # ============================================
