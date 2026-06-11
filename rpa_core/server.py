@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from rpa_core import FlowEngine, ExecutionResult
 from rpa_core.browser import BrowserAdapter
 from rpa_core.storage import RunHistory
+from rpa_core.scheduler import Scheduler, cron
 from rpa_core.utils import setup_logger
 
 # 配置日志
@@ -127,6 +128,16 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class ScheduleCreate(BaseModel):
+    """定时任务创建模型"""
+    name: str = Field(..., description="任务名称")
+    flow: FlowDefinition = Field(..., description="要定时执行的 Flow")
+    initial_context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="初始上下文")
+    schedule_type: str = Field(..., description="调度类型: cron | interval")
+    schedule_value: str = Field(..., description="cron 表达式（5 字段）或 interval 秒数")
+    enabled: bool = Field(True, description="是否启用")
+
+
 # ============================================
 # 全局状态
 #
@@ -156,6 +167,22 @@ def _record_run(result: ExecutionResult) -> None:
         logger.error(f"写入运行历史失败: {str(e)}")
 
 
+def _run_scheduled_flow(flow: Dict[str, Any], initial_context: Dict[str, Any]) -> ExecutionResult:
+    """
+    调度器执行流程的回调：在 worker 线程中阻塞执行。
+    与手动执行共用同一把执行锁，确保不会两个流程同时驱动唯一的浏览器。
+    """
+    with _execution_lock:
+        engine = FlowEngine(browser=get_shared_browser())
+        result = engine.execute(flow, initial_context)
+        _record_run(result)
+        return result
+
+
+# 调度引擎（cron / interval）
+_scheduler = Scheduler(run_callback=_run_scheduled_flow)
+
+
 def get_shared_browser() -> BrowserAdapter:
     """获取（必要时惰性创建）共享浏览器实例。线程安全。"""
     global _shared_browser
@@ -170,11 +197,13 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global _shared_browser
     logger.info("启动 RPA Server...")
+    _scheduler.start()
 
     yield
 
-    # 清理资源：关闭共享浏览器
+    # 清理资源：停止调度、关闭共享浏览器
     logger.info("关闭 RPA Server...")
+    _scheduler.stop()
     with _browser_init_lock:
         if _shared_browser is not None:
             _shared_browser.close()
@@ -531,6 +560,82 @@ async def get_run(run_id: str) -> Dict[str, Any]:
     if run is None:
         raise HTTPException(status_code=404, detail="运行记录不存在")
     return run
+
+
+# ============================================
+# 定时任务调度
+# ============================================
+
+def _validate_schedule(schedule_type: str, schedule_value: str) -> None:
+    """校验调度配置；非法则抛 HTTPException(400)。"""
+    if schedule_type == "cron":
+        try:
+            cron.parse_cron(schedule_value)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"cron 表达式非法: {e}")
+    elif schedule_type == "interval":
+        try:
+            if int(schedule_value) <= 0:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=400, detail="interval 必须为正整数秒数")
+    else:
+        raise HTTPException(status_code=400, detail="schedule_type 必须为 cron 或 interval")
+
+
+@app.post("/schedules", dependencies=[Depends(verify_token)])
+async def create_schedule(req: ScheduleCreate) -> Dict[str, Any]:
+    """创建定时任务。"""
+    _validate_schedule(req.schedule_type, req.schedule_value)
+    from datetime import datetime
+    job = _scheduler.store.create({
+        "name": req.name,
+        "flow": req.flow.model_dump(exclude_none=True),
+        "initial_context": req.initial_context or {},
+        "schedule_type": req.schedule_type,
+        "schedule_value": req.schedule_value,
+        "enabled": req.enabled,
+        "created_at": datetime.now().isoformat(),
+    })
+    return job
+
+
+@app.get("/schedules", dependencies=[Depends(verify_token)])
+async def list_schedules() -> Dict[str, Any]:
+    """列出所有定时任务。"""
+    return {"schedules": _scheduler.store.list()}
+
+
+@app.get("/schedules/{job_id}", dependencies=[Depends(verify_token)])
+async def get_schedule(job_id: str) -> Dict[str, Any]:
+    job = _scheduler.store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return job
+
+
+@app.patch("/schedules/{job_id}", dependencies=[Depends(verify_token)])
+async def update_schedule(job_id: str, enabled: bool) -> Dict[str, Any]:
+    """启用/停用定时任务。"""
+    if _scheduler.store.get(job_id) is None:
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    _scheduler.store.update_fields(job_id, enabled=1 if enabled else 0)
+    return _scheduler.store.get(job_id)
+
+
+@app.delete("/schedules/{job_id}", dependencies=[Depends(verify_token)])
+async def delete_schedule(job_id: str) -> Dict[str, Any]:
+    if not _scheduler.store.delete(job_id):
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return {"success": True}
+
+
+@app.post("/schedules/{job_id}/run-now", dependencies=[Depends(verify_token)])
+async def run_schedule_now(job_id: str) -> Dict[str, Any]:
+    """立即触发一次定时任务（入队，由 worker 串行执行）。"""
+    if not _scheduler.run_now(job_id):
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return {"success": True, "message": "已入队，将尽快执行"}
 
 
 # ============================================

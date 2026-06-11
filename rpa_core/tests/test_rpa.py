@@ -3,6 +3,7 @@ RPA Core Unit Tests
 """
 import unittest
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Add project root to python path
@@ -357,6 +358,142 @@ class TestBrowserScenarios(unittest.TestCase):
         a.new_tab("https://example.com")
         self.assertEqual(a._active.name, "new")
         self.assertEqual(a._page.new_url, "https://example.com")
+
+
+class TestCron(unittest.TestCase):
+    """测试零依赖 cron 解析器"""
+
+    def test_wildcard_always_matches(self):
+        from rpa_core.scheduler import cron
+        self.assertTrue(cron.cron_match("* * * * *", datetime(2026, 6, 11, 3, 7)))
+
+    def test_specific_time(self):
+        from rpa_core.scheduler import cron
+        self.assertTrue(cron.cron_match("0 9 * * *", datetime(2026, 6, 11, 9, 0)))
+        self.assertFalse(cron.cron_match("0 9 * * *", datetime(2026, 6, 11, 9, 1)))
+
+    def test_step(self):
+        from rpa_core.scheduler import cron
+        for m in (0, 15, 30, 45):
+            self.assertTrue(cron.cron_match("*/15 * * * *", datetime(2026, 6, 11, 1, m)))
+        self.assertFalse(cron.cron_match("*/15 * * * *", datetime(2026, 6, 11, 1, 7)))
+
+    def test_dow_sunday(self):
+        from rpa_core.scheduler import cron
+        # 2026-06-14 是周日
+        self.assertTrue(cron.cron_match("0 0 * * 0", datetime(2026, 6, 14, 0, 0)))
+        self.assertTrue(cron.cron_match("0 0 * * 7", datetime(2026, 6, 14, 0, 0)))
+        self.assertFalse(cron.cron_match("0 0 * * 1", datetime(2026, 6, 14, 0, 0)))
+
+    def test_next_run(self):
+        from rpa_core.scheduler import cron
+        nxt = cron.next_run("0 9 * * *", datetime(2026, 6, 11, 10, 0))
+        self.assertEqual((nxt.hour, nxt.minute, nxt.day), (9, 0, 12))
+
+    def test_invalid(self):
+        from rpa_core.scheduler import cron
+        with self.assertRaises(ValueError):
+            cron.parse_cron("* * *")
+        with self.assertRaises(ValueError):
+            cron.parse_cron("99 * * * *")
+
+
+class TestScheduleStore(unittest.TestCase):
+    def setUp(self):
+        import tempfile, os
+        self.db = os.path.join(tempfile.gettempdir(), "rpa_sched_unittest.db")
+        if os.path.exists(self.db):
+            os.remove(self.db)
+        from rpa_core.scheduler import ScheduleStore
+        self.store = ScheduleStore(db_path=self.db)
+
+    def tearDown(self):
+        import os
+        if os.path.exists(self.db):
+            os.remove(self.db)
+
+    def test_crud(self):
+        job = self.store.create({
+            "name": "j1", "flow": {"name": "f", "steps": []},
+            "schedule_type": "interval", "schedule_value": "60",
+        })
+        self.assertTrue(job["id"])
+        self.assertEqual(job["flow"]["name"], "f")
+        self.assertTrue(job["enabled"])
+        self.store.update_fields(job["id"], enabled=0)
+        self.assertFalse(self.store.get(job["id"])["enabled"])
+        self.assertEqual(len(self.store.list()), 1)
+        self.assertTrue(self.store.delete(job["id"]))
+        self.assertIsNone(self.store.get(job["id"]))
+
+
+class TestScheduler(unittest.TestCase):
+    """测试调度引擎（不启动线程，用受控时钟 + 同步排空队列）"""
+
+    def setUp(self):
+        import tempfile, os
+        self.db = os.path.join(tempfile.gettempdir(), "rpa_sched2_unittest.db")
+        if os.path.exists(self.db):
+            os.remove(self.db)
+        from rpa_core.scheduler import Scheduler, ScheduleStore
+        self.store = ScheduleStore(db_path=self.db)
+        self.calls = []
+        self.clock = {"t": datetime(2026, 6, 11, 10, 0, 0)}
+        self.sched = Scheduler(
+            run_callback=lambda flow, ctx: self.calls.append(flow),
+            store=self.store,
+            now_fn=lambda: self.clock["t"],
+        )
+
+    def tearDown(self):
+        import os
+        if os.path.exists(self.db):
+            os.remove(self.db)
+
+    def _make_interval_job(self, seconds=60, enabled=True):
+        return self.store.create({
+            "name": "j", "flow": {"name": "f", "steps": []},
+            "schedule_type": "interval", "schedule_value": str(seconds),
+            "enabled": enabled, "created_at": self.clock["t"].isoformat(),
+        })
+
+    def test_interval_fires_after_due(self):
+        from datetime import timedelta
+        self._make_interval_job(60)
+        t0 = self.clock["t"]
+        # 首次 poll：仅设置 next_run，不触发
+        self.assertEqual(self.sched.poll(t0), 0)
+        # 未到点
+        self.assertEqual(self.sched.poll(t0 + timedelta(seconds=30)), 0)
+        # 到点：入队
+        self.assertEqual(self.sched.poll(t0 + timedelta(seconds=61)), 1)
+        # 执行队列 -> 回调被调用
+        self.assertEqual(self.sched.process_queue(), 1)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_disabled_not_fired(self):
+        from datetime import timedelta
+        self._make_interval_job(60, enabled=False)
+        t0 = self.clock["t"]
+        self.sched.poll(t0)
+        self.assertEqual(self.sched.poll(t0 + timedelta(seconds=120)), 0)
+
+    def test_run_now(self):
+        job = self._make_interval_job(60)
+        self.assertTrue(self.sched.run_now(job["id"]))
+        self.assertEqual(self.sched.process_queue(), 1)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.sched.run_now("nope"))
+
+    def test_callback_error_recorded(self):
+        from rpa_core.scheduler import Scheduler
+        def boom(flow, ctx):
+            raise RuntimeError("kaboom")
+        sched = Scheduler(run_callback=boom, store=self.store, now_fn=lambda: self.clock["t"])
+        job = self._make_interval_job(60)
+        sched.run_now(job["id"])
+        sched.process_queue()  # 不应抛出
+        self.assertTrue(self.store.get(job["id"])["last_status"].startswith("error"))
 
 
 if __name__ == "__main__":
