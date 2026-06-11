@@ -161,5 +161,72 @@ class TestFlowEngineControlFlow(unittest.TestCase):
         self.assertEqual(len(res.execution_log), 4)
 
 
+class TestNormalizeSelector(unittest.TestCase):
+    """测试选择器规范化（修正 DrissionPage 复合 CSS 退化为文本匹配的隐患）"""
+
+    def test_explicit_prefixes_passthrough(self):
+        from rpa_core.browser.adapter import normalize_selector
+        for s in ["css:.a.b", "xpath://div", "x://div", "text:登录", "tx:登录",
+                  "tag:button", "@id=foo", "c:.x", "t:div"]:
+            self.assertEqual(normalize_selector(s), s)
+
+    def test_bare_css_gets_css_prefix(self):
+        from rpa_core.browser.adapter import normalize_selector
+        # 复合 CSS / 多类 / id / 单类：统一显式标注为 CSS
+        self.assertEqual(normalize_selector("h1.title"), "css:h1.title")
+        self.assertEqual(normalize_selector("div > span:nth-of-type(2)"), "css:div > span:nth-of-type(2)")
+        self.assertEqual(normalize_selector(".a.b"), "css:.a.b")
+        self.assertEqual(normalize_selector("#kw"), "css:#kw")
+
+    def test_bare_xpath_gets_xpath_prefix(self):
+        from rpa_core.browser.adapter import normalize_selector
+        self.assertEqual(normalize_selector("//div[@id='x']"), "xpath://div[@id='x']")
+        self.assertEqual(normalize_selector("(//a)[1]"), "xpath:(//a)[1]")
+
+
+class TestSelfHealingFind(unittest.TestCase):
+    """测试候选选择器自愈回退（_find_element），用假 page 避免真实浏览器"""
+
+    def _make_adapter(self, resolvable):
+        """resolvable: 一组「规范化后能命中」的选择器集合"""
+        from rpa_core.browser.adapter import BrowserAdapter
+
+        class FakeEle:
+            text = "ok"
+            def click(self): pass
+
+        class FakePage:
+            def ele(self, sel, timeout=10):
+                return FakeEle() if sel in resolvable else None
+
+        adapter = BrowserAdapter()
+        adapter._page = FakePage()
+        return adapter
+
+    def test_primary_hit(self):
+        adapter = self._make_adapter({"css:#main"})
+        ele, used, idx = adapter._find_element(["#main", "css:.fallback"], timeout=1)
+        self.assertEqual(used, "#main")
+        self.assertEqual(idx, 0)
+
+    def test_fallback_when_primary_misses(self):
+        # 主选择器失效，回退到第二候选
+        adapter = self._make_adapter({"css:.fallback"})
+        ele, used, idx = adapter._find_element(["#gone", ".fallback"], timeout=1)
+        self.assertEqual(used, ".fallback")
+        self.assertEqual(idx, 1)
+
+    def test_all_miss_raises(self):
+        from rpa_core.browser.adapter import ElementNotFoundError
+        adapter = self._make_adapter(set())
+        with self.assertRaises(ElementNotFoundError):
+            adapter._find_element(["#a", "#b"], timeout=1)
+
+    def test_single_string_backward_compatible(self):
+        adapter = self._make_adapter({"css:#solo"})
+        ele, used, idx = adapter._find_element("#solo", timeout=1)
+        self.assertEqual(used, "#solo")
+
+
 if __name__ == "__main__":
     unittest.main()

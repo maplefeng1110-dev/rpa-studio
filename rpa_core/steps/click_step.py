@@ -28,18 +28,18 @@ class ClickStep(BaseStep):
         Returns:
             StepResult: 执行结果
         """
-        selector = self._render_value(self.selector, context)
-        
-        if not selector:
+        candidates = self._candidate_selectors(context)
+
+        if not candidates:
             raise StepError(self.step_type, "selector 不能为空")
-        
+
         try:
-            browser.click(selector, timeout=self.timeout)
+            used = browser.click(candidates, timeout=self.timeout)
             return StepResult(
                 success=True,
-                message=f"成功点击元素: {selector}"
+                message=f"成功点击元素: {used}"
             )
-        except ElementNotFoundError:
-            raise StepError(self.step_type, f"元素未找到: {selector}")
+        except ElementNotFoundError as e:
+            raise StepError(self.step_type, str(e))
         except Exception as e:
-            raise StepError(self.step_type, f"点击失败: {selector}, 错误: {str(e)}")
+            raise StepError(self.step_type, f"点击失败: {candidates}, 错误: {str(e)}")

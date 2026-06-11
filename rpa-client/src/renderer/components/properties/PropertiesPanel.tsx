@@ -76,7 +76,8 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = () => {
           const res = await api.pickElementResult();
           if (res && res.selector) {
             clearInterval(interval);
-            handleUpdate({ selector: res.selector });
+            // 同时保存候选列表，运行时支持选择器自愈回退
+            handleUpdate({ selector: res.selector, selectors: res.selectors });
             setIsPicking(false);
           } else if (res && res.success === false && (res.message || '').includes('未启动')) {
             clearInterval(interval);

@@ -65,6 +65,21 @@ class BaseStep(ABC):
         if value is None:
             return None
         return context.render(value)
+
+    def _candidate_selectors(self, context: RuntimeContext) -> list:
+        """
+        收集本步骤的候选选择器（已渲染），供 BrowserAdapter 自愈回退使用。
+        - 优先使用 config['selectors']（候选列表，按优先级排序）
+        - 否则回退到单个 config['selector']
+        """
+        raw = self.config.get("selectors")
+        if isinstance(raw, (list, tuple)) and raw:
+            rendered = [self._render_value(s, context) for s in raw]
+            return [s for s in rendered if s]
+        if self.selector:
+            single = self._render_value(self.selector, context)
+            return [single] if single else []
+        return []
     
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(type={self.step_type}, selector={self.selector})"

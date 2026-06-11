@@ -10,6 +10,7 @@ export interface StepConfig {
   id: string;
   type: StepType;
   selector?: string;
+  selectors?: string[];  // 候选选择器（按优先级排序），运行时自愈回退
   value?: string;
   timeout: number;
   on_fail: 'abort' | 'skip' | 'retry';

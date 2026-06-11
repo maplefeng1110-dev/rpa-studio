@@ -74,7 +74,8 @@ class StepConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: str = Field(..., description="Step 类型: open, click, input, wait, extract, if, loop")
-    selector: Optional[str] = Field(None, description="CSS 选择器")
+    selector: Optional[str] = Field(None, description="选择器（CSS/XPath/text，无前缀默认按 CSS 解析）")
+    selectors: Optional[List[str]] = Field(None, description="候选选择器列表，按优先级排序，运行时自愈回退")
     value: Optional[Any] = Field(None, description="值/URL")
     timeout: int = Field(10, description="超时时间（秒）")
     on_fail: str = Field("abort", description="失败策略: abort, skip, retry")
@@ -218,9 +219,12 @@ async def pick_element_result() -> Dict[str, Any]:
     """获取元素拾取结果"""
     try:
         if _shared_browser is None:
-            return {"success": False, "selector": None, "message": "浏览器未启动"}
-        selector = _shared_browser.pick_element_result()
-        return {"success": True, "selector": selector}
+            return {"success": False, "selector": None, "selectors": [], "message": "浏览器未启动"}
+        result = _shared_browser.pick_element_result()
+        if not result:
+            return {"success": True, "selector": None, "selectors": []}
+        # result: {"selector": 首选, "selectors": [候选...]}
+        return {"success": True, "selector": result["selector"], "selectors": result["selectors"]}
     except Exception as e:
         logger.error(f"获取元素拾取结果失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

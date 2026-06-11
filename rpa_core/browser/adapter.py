@@ -4,8 +4,53 @@ Browser Adapter 模块
 任何上层模块禁止直接使用 DrissionPage API
 """
 import time
-from typing import Optional
+from typing import List, Optional, Tuple, Union
 from DrissionPage import ChromiumPage, ChromiumOptions
+
+from ..utils import setup_logger
+
+logger = setup_logger("BrowserAdapter")
+
+# DrissionPage 原生识别的定位前缀。带这些前缀的选择器原样透传。
+_KNOWN_PREFIXES = (
+    "xpath:", "xpath=", "x:", "x=",
+    "css:", "css=", "c:", "c=",
+    "text:", "text=", "text^", "text$", "tx:", "tx=", "tx^", "tx$",
+    "tag:", "tag=", "tag^", "tag$", "t:", "t=",
+    "@",
+)
+
+
+def normalize_selector(selector: str) -> str:
+    """
+    将选择器规范化为 DrissionPage 能正确解析的形式。
+
+    背景：DrissionPage 的 ele() 对「无前缀」字符串的处理是——只有 #id / .class（单类）
+    会被当定位符，其余（如 h1.title、div > span、.a.b 复合 CSS）会退化成「文本模糊匹配」，
+    并不会按 CSS 解析。这里统一把无前缀的串显式标注为 CSS（或裸 XPath 标注为 xpath），
+    既修正了复合 CSS 失效的隐患，也让多类选择器（.a.b）正确工作。
+
+    - 已带前缀（css:/xpath:/text:/@... 等）：原样返回
+    - 裸 XPath（以 / 或 ( 开头）：加 xpath: 前缀
+    - 其余一律按 CSS 处理：加 css: 前缀
+    """
+    if not selector:
+        return selector
+    s = selector.strip()
+    if s.startswith(_KNOWN_PREFIXES):
+        return s
+    if s.startswith(("/", "(")):
+        return f"xpath:{s}"
+    return f"css:{s}"
+
+
+def _as_candidates(selector: Union[str, List[str], None]) -> List[str]:
+    """把单个选择器或候选列表统一成非空候选列表。"""
+    if selector is None:
+        return []
+    if isinstance(selector, (list, tuple)):
+        return [s for s in selector if s]
+    return [selector] if selector else []
 
 
 class BrowserAdapter:
@@ -60,87 +105,101 @@ class BrowserAdapter:
         except Exception as e:
             raise PageLoadTimeoutError(f"页面加载超时或失败: {url}, 错误: {str(e)}")
     
-    def click(self, selector: str, timeout: int = 10) -> None:
+    def _find_element(
+        self,
+        selector: Union[str, List[str]],
+        timeout: int = 10,
+    ) -> Tuple[object, str, int]:
         """
-        点击元素
-        
+        按候选选择器顺序定位元素，实现「选择器自愈」：
+        依次尝试每个候选，命中即返回。若主选择器（第 0 个）失效而靠后续候选命中，
+        会打 warning 日志作为页面漂移的信号。
+
         Args:
-            selector: 元素选择器
-            timeout: 超时时间（秒）
+            selector: 单个选择器或候选选择器列表（按优先级排序）
+            timeout: 首选选择器的超时时间；后续候选用较短超时避免叠加等待
+
+        Returns:
+            (元素, 命中的原始选择器, 命中候选的下标)
+
+        Raises:
+            ElementNotFoundError: 所有候选都未命中
         """
+        candidates = _as_candidates(selector)
+        if not candidates:
+            raise ElementNotFoundError("未提供任何选择器")
+
+        page = self._ensure_page()
+        last_error: Optional[str] = None
+
+        for idx, raw in enumerate(candidates):
+            normalized = normalize_selector(raw)
+            # 首选用完整 timeout，后备候选用较短超时（最多 3s）
+            attempt_timeout = timeout if idx == 0 else min(timeout, 3)
+            try:
+                element = page.ele(normalized, timeout=attempt_timeout)
+            except Exception as e:
+                last_error = str(e)
+                element = None
+
+            if element:
+                if idx > 0:
+                    logger.warning(
+                        f"选择器自愈：主选择器 '{candidates[0]}' 失效，"
+                        f"已回退到候选 #{idx} '{raw}'"
+                    )
+                return element, raw, idx
+
+        detail = f"，最后错误: {last_error}" if last_error else ""
+        raise ElementNotFoundError(f"元素未找到（已尝试 {len(candidates)} 个候选）: {candidates}{detail}")
+
+    def click(self, selector: Union[str, List[str]], timeout: int = 10) -> str:
+        """
+        点击元素。selector 可为单个选择器或候选列表（自愈回退）。
+
+        Returns:
+            实际命中的选择器
+        """
+        element, used, _ = self._find_element(selector, timeout=timeout)
         try:
-            page = self._ensure_page()
-            element = page.ele(selector, timeout=timeout)
-            if element is None:
-                raise ElementNotFoundError(f"元素未找到: {selector}")
             element.click()
         except Exception as e:
-            if isinstance(e, ElementNotFoundError):
-                raise
-            raise ElementNotFoundError(f"点击元素失败: {selector}, 错误: {str(e)}")
-    
-    def input(self, selector: str, text: str, timeout: int = 10, clear: bool = True) -> None:
+            raise ElementNotFoundError(f"点击元素失败: {used}, 错误: {str(e)}")
+        return used
+
+    def input(self, selector: Union[str, List[str]], text: str, timeout: int = 10, clear: bool = True) -> str:
         """
-        输入文本
-        
-        Args:
-            selector: 元素选择器
-            text: 要输入的文本
-            timeout: 超时时间（秒）
-            clear: 是否先清空输入框
+        输入文本。selector 可为单个选择器或候选列表（自愈回退）。
+
+        Returns:
+            实际命中的选择器
         """
+        element, used, _ = self._find_element(selector, timeout=timeout)
         try:
-            page = self._ensure_page()
-            element = page.ele(selector, timeout=timeout)
-            if element is None:
-                raise ElementNotFoundError(f"元素未找到: {selector}")
             if clear:
                 element.clear()
             element.input(text)
         except Exception as e:
-            if isinstance(e, ElementNotFoundError):
-                raise
-            raise ElementNotFoundError(f"输入文本失败: {selector}, 错误: {str(e)}")
-    
-    def exists(self, selector: str, timeout: int = 3) -> bool:
-        """
-        判断元素是否存在
-        
-        Args:
-            selector: 元素选择器
-            timeout: 超时时间（秒）
-        
-        Returns:
-            元素是否存在
-        """
+            raise ElementNotFoundError(f"输入文本失败: {used}, 错误: {str(e)}")
+        return used
+
+    def exists(self, selector: Union[str, List[str]], timeout: int = 3) -> bool:
+        """判断元素是否存在（任一候选命中即为存在）。"""
         try:
-            page = self._ensure_page()
-            element = page.ele(selector, timeout=timeout)
-            return element is not None
-        except Exception:
+            self._find_element(selector, timeout=timeout)
+            return True
+        except ElementNotFoundError:
             return False
-    
-    def text(self, selector: str, timeout: int = 10) -> str:
+
+    def text(self, selector: Union[str, List[str]], timeout: int = 10) -> str:
         """
-        获取元素文本内容
-        
-        Args:
-            selector: 元素选择器
-            timeout: 超时时间（秒）
-        
-        Returns:
-            元素的文本内容
+        获取元素文本内容。selector 可为单个选择器或候选列表（自愈回退）。
         """
+        element, used, _ = self._find_element(selector, timeout=timeout)
         try:
-            page = self._ensure_page()
-            element = page.ele(selector, timeout=timeout)
-            if element is None:
-                raise ElementNotFoundError(f"元素未找到: {selector}")
             return element.text
         except Exception as e:
-            if isinstance(e, ElementNotFoundError):
-                raise
-            raise ElementNotFoundError(f"获取元素文本失败: {selector}, 错误: {str(e)}")
+            raise ElementNotFoundError(f"获取元素文本失败: {used}, 错误: {str(e)}")
     
     def wait(self, seconds: float) -> None:
         """
@@ -199,14 +258,14 @@ class BrowserAdapter:
 
     var lastEl = null;
 
-    function getCssSelector(el) {
+    function cssPath(el) {
         if (!el || el === document.body) return 'body';
         if (el.id) return '#' + CSS.escape(el.id);
         var parts = [];
         while (el && el !== document.body) {
             var seg = el.tagName.toLowerCase();
             if (el.id) { seg = '#' + CSS.escape(el.id); parts.unshift(seg); break; }
-            if (el.className) {
+            if (el.className && typeof el.className === 'string') {
                 var cls = Array.from(el.classList).slice(0, 2).map(function(c){ return '.' + CSS.escape(c); }).join('');
                 seg += cls;
             }
@@ -219,6 +278,29 @@ class BrowserAdapter:
         return parts.join(' > ');
     }
 
+    // 生成一组按稳定性排序的候选选择器，供运行时自愈回退
+    function buildCandidates(el) {
+        var out = [];
+        var tag = el.tagName.toLowerCase();
+        function push(s) { if (s && out.indexOf(s) === -1) out.push(s); }
+
+        // 1) id 最稳定
+        if (el.id) push('#' + CSS.escape(el.id));
+        // 2) 测试/语义属性
+        ['data-testid', 'data-test', 'data-id', 'name', 'aria-label'].forEach(function(a) {
+            var v = el.getAttribute && el.getAttribute(a);
+            if (v) push('css:' + tag + '[' + a + '="' + v.replace(/"/g, '\\"') + '"]');
+        });
+        // 3) 完整 CSS 路径
+        push('css:' + cssPath(el));
+        // 4) 文本定位（按钮/链接等短文本元素）
+        var txt = (el.textContent || '').trim();
+        if (txt && txt.length <= 30 && (tag === 'a' || tag === 'button' || el.getAttribute('role') === 'button')) {
+            push('text:' + txt);
+        }
+        return out;
+    }
+
     function onMouseOver(e) {
         if (lastEl) lastEl.style.outline = '';
         lastEl = e.target;
@@ -228,8 +310,9 @@ class BrowserAdapter:
     function onClick(e) {
         e.preventDefault();
         e.stopPropagation();
-        var sel = getCssSelector(e.target);
-        window.__picked_selector = sel;
+        var candidates = buildCandidates(e.target);
+        window.__picked_selectors = candidates;
+        window.__picked_selector = candidates[0] || null;  // 向后兼容
         cleanup();
     }
 
@@ -254,16 +337,19 @@ class BrowserAdapter:
 """
         page.run_js(js)
 
-    def pick_element_result(self) -> Optional[str]:
+    def pick_element_result(self) -> Optional[dict]:
         """
-        读取页面上已拾取的元素选择器。
-        有结果则清除并返回选择器字符串，否则返回 None。
+        读取页面上已拾取的元素选择器候选列表。
+        有结果则清除并返回 {"selector": 首选, "selectors": [候选...]}，否则返回 None。
         """
         page = self._ensure_page()
-        result = page.run_js("return window.__picked_selector || null;")
+        result = page.run_js("return window.__picked_selectors || null;")
         if result:
-            page.run_js("window.__picked_selector = null;")
-            return str(result)
+            page.run_js("window.__picked_selectors = null; window.__picked_selector = null;")
+            selectors = [str(s) for s in result if s]
+            if not selectors:
+                return None
+            return {"selector": selectors[0], "selectors": selectors}
         return None
 
     def close(self) -> None:

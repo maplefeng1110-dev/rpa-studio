@@ -36,15 +36,15 @@ class ExtractStep(BaseStep):
         Returns:
             StepResult: 执行结果
         """
-        selector = self._render_value(self.selector, context)
+        candidates = self._candidate_selectors(context)
         save_path = self._render_value(self.save_path, context)
-        
-        if not selector:
+
+        if not candidates:
             raise StepError(self.step_type, "selector 不能为空")
-        
+
         try:
-            # 提取文本
-            text = browser.text(selector, timeout=self.timeout)
+            # 提取文本（支持候选选择器自愈回退）
+            text = browser.text(candidates, timeout=self.timeout)
             
             # 存储到 Context
             context.set(self.context_key, text)
@@ -71,7 +71,9 @@ class ExtractStep(BaseStep):
                     data={"text_length": len(text)}
                 )
                 
-        except ElementNotFoundError:
-            raise StepError(self.step_type, f"元素未找到: {selector}")
+        except ElementNotFoundError as e:
+            raise StepError(self.step_type, str(e))
+        except StepError:
+            raise
         except Exception as e:
-            raise StepError(self.step_type, f"提取失败: {selector}, 错误: {str(e)}")
+            raise StepError(self.step_type, f"提取失败: {candidates}, 错误: {str(e)}")

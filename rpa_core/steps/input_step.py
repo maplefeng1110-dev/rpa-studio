@@ -29,22 +29,22 @@ class InputStep(BaseStep):
         Returns:
             StepResult: 执行结果
         """
-        selector = self._render_value(self.selector, context)
+        candidates = self._candidate_selectors(context)
         value = self._render_value(self.value, context)
-        
-        if not selector:
+
+        if not candidates:
             raise StepError(self.step_type, "selector 不能为空")
-        
+
         if value is None:
             value = ""
-        
+
         try:
-            browser.input(selector, value, timeout=self.timeout)
+            used = browser.input(candidates, value, timeout=self.timeout)
             return StepResult(
                 success=True,
-                message=f"成功输入文本到: {selector}"
+                message=f"成功输入文本到: {used}"
             )
-        except ElementNotFoundError:
-            raise StepError(self.step_type, f"元素未找到: {selector}")
+        except ElementNotFoundError as e:
+            raise StepError(self.step_type, str(e))
         except Exception as e:
-            raise StepError(self.step_type, f"输入失败: {selector}, 错误: {str(e)}")
+            raise StepError(self.step_type, f"输入失败: {candidates}, 错误: {str(e)}")
