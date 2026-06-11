@@ -1,0 +1,19 @@
+{
+  "name": "baidu_search_demo",
+  "description": "示例流程：打开百度并搜索关键词",
+  "steps": [
+    {
+      "type": "open",
+      "value": "https://www.baidu.com",
+      "timeout": 15,
+      "on_fail": "abort"
+    },
+    {
+      "type": "input",
+      "selector": "#kw",
+      "value": "{{search_keyword}}\n",
+      "timeout": 10,
+      "on_fail": "abort"
+    }
+  ]
+}

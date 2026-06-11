@@ -1,0 +1,25 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 运行产物
+rpa_core/logs/
+rpa_core/output/
+.rpa_token
+
+# Node / Electron
+node_modules/
+rpa-client/dist/
+rpa-client/dist-electron/
+rpa-client/out/
+rpa-client/release/
+
+# 系统 / 编辑器
+.DS_Store
+*.log
+.idea/
+.vscode/

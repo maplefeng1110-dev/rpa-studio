@@ -1,0 +1,486 @@
+"""
+RPA Core FastAPI Server
+提供 HTTP API 接口供 Electron 客户端调用
+"""
+import sys
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from contextlib import asynccontextmanager
+import os
+import uuid
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import FastAPI, HTTPException, Security, Depends, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field, ConfigDict
+
+# 添加项目根目录到 Python 路径
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from rpa_core import FlowEngine, ExecutionResult
+from rpa_core.browser import BrowserAdapter
+from rpa_core.utils import setup_logger
+
+# 配置日志
+logger = setup_logger("FastAPIServer")
+
+# ============================================
+# API 令牌与安全配置
+# ============================================
+API_TOKEN = os.environ.get("RPA_API_TOKEN")
+if not API_TOKEN:
+    API_TOKEN = str(uuid.uuid4())
+    logger.info(f"未检测到 RPA_API_TOKEN 环境变量，自动生成临时 API 令牌: {API_TOKEN}")
+    # 打印特殊格式的 token 信息，供 Electron 主进程读取
+    print(f"__RPA_API_TOKEN_START__={API_TOKEN}", flush=True)
+
+# 将 Token 写入本地文件，供 Electron 客户端自愈匹配
+try:
+    token_file = Path(__file__).parent.parent / ".rpa_token"
+    token_file.write_text(API_TOKEN)
+    logger.info(f"已将 API Token 写入本地文件: {token_file}")
+except Exception as e:
+    logger.error(f"写入 Token 文件失败: {str(e)}")
+
+
+security_header = APIKeyHeader(name="X-RPA-Token", auto_error=False)
+security_bearer = HTTPBearer(auto_error=False)
+
+async def verify_token(
+    x_token: Optional[str] = Depends(security_header),
+    auth: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
+):
+    token = x_token or (auth.credentials if auth else None)
+    if token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Token")
+
+
+# ============================================
+# Pydantic 模型定义
+# ============================================
+
+class StepConfig(BaseModel):
+    """
+    Step 配置模型。
+    extra='allow' 用于保留控制流字段（if 的 condition/then/else、
+    loop 的 loop_type/steps/item_key/index_key，以及 retry 的 max_retries 等），
+    否则 model_dump() 会把它们丢掉，导致 /execute 路径无法执行 if/loop。
+    """
+    model_config = ConfigDict(extra="allow")
+
+    type: str = Field(..., description="Step 类型: open, click, input, wait, extract, if, loop")
+    selector: Optional[str] = Field(None, description="CSS 选择器")
+    value: Optional[Any] = Field(None, description="值/URL")
+    timeout: int = Field(10, description="超时时间（秒）")
+    on_fail: str = Field("abort", description="失败策略: abort, skip, retry")
+    save_path: Optional[str] = Field(None, description="保存路径（extract 专用）")
+    context_key: Optional[str] = Field(None, description="上下文键名（extract 专用）")
+
+
+class FlowDefinition(BaseModel):
+    """Flow 定义模型"""
+    name: str = Field("unnamed_flow", description="Flow 名称")
+    description: Optional[str] = Field(None, description="Flow 描述")
+    steps: List[StepConfig] = Field(..., description="Step 列表")
+
+
+class ExecuteRequest(BaseModel):
+    """执行请求模型"""
+    flow: FlowDefinition = Field(..., description="Flow 定义")
+    initial_context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="初始上下文")
+
+
+class ExecutionLogEntry(BaseModel):
+    """执行日志条目"""
+    step_index: int
+    step_type: str
+    start_time: str
+    end_time: str
+    duration_ms: float
+    success: bool
+    message: str
+
+
+class ExecuteResponse(BaseModel):
+    """执行响应模型"""
+    success: bool
+    flow_name: str
+    executed_steps: int
+    total_steps: int
+    context: Dict[str, Any]
+    execution_log: List[ExecutionLogEntry]
+    error: Optional[str] = None
+
+
+class HealthResponse(BaseModel):
+    """健康检查响应"""
+    status: str
+    version: str
+
+
+# ============================================
+# 全局状态
+#
+# 设计说明：
+# - 共享一个浏览器实例（桌面单用户场景：拾取元素与运行流程用同一个 Chrome 窗口）。
+# - 但「执行状态」不再共享：每次执行都新建一个 FlowEngine，拥有独立的
+#   Context / 计数器 / 暂停-停止标志 / 日志回调，避免并发执行互相串改状态。
+# - 由于只有一个浏览器，物理上无法真正并行驱动两个流程，因此用执行锁串行化：
+#   已有流程在跑时，新的执行请求会被拒绝（HTTP 409 / WS error）。
+# ============================================
+
+_executor = ThreadPoolExecutor(max_workers=5)
+
+_shared_browser: Optional[BrowserAdapter] = None
+_browser_init_lock = threading.Lock()
+_execution_lock = threading.Lock()
+
+
+def get_shared_browser() -> BrowserAdapter:
+    """获取（必要时惰性创建）共享浏览器实例。线程安全。"""
+    global _shared_browser
+    with _browser_init_lock:
+        if _shared_browser is None:
+            _shared_browser = BrowserAdapter()
+        return _shared_browser
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    global _shared_browser
+    logger.info("启动 RPA Server...")
+
+    yield
+
+    # 清理资源：关闭共享浏览器
+    logger.info("关闭 RPA Server...")
+    with _browser_init_lock:
+        if _shared_browser is not None:
+            _shared_browser.close()
+            _shared_browser = None
+
+
+# ============================================
+# FastAPI 应用
+# ============================================
+
+app = FastAPI(
+    title="RPA Core API",
+    description="RPA 流程引擎 HTTP API",
+    version="0.1.0",
+    lifespan=lifespan
+)
+
+# 配置 CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============================================
+# API 路由
+# ============================================
+
+@app.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    """健康检查"""
+    return HealthResponse(
+        status="ok",
+        version="0.1.0"
+    )
+
+
+@app.post("/pick-element/start", dependencies=[Depends(verify_token)])
+async def pick_element_start() -> Dict[str, Any]:
+    """开始元素拾取模式"""
+    try:
+        browser = get_shared_browser()
+        browser._ensure_page()
+        browser.pick_element_start()
+        return {"success": True, "message": "元素拾取模式已启动"}
+    except Exception as e:
+        logger.error(f"启动元素拾取失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/pick-element/result", dependencies=[Depends(verify_token)])
+async def pick_element_result() -> Dict[str, Any]:
+    """获取元素拾取结果"""
+    try:
+        if _shared_browser is None:
+            return {"success": False, "selector": None, "message": "浏览器未启动"}
+        selector = _shared_browser.pick_element_result()
+        return {"success": True, "selector": selector}
+    except Exception as e:
+        logger.error(f"获取元素拾取结果失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def make_log_callback(websocket: WebSocket, loop: asyncio.AbstractEventLoop):
+    """创建线程安全的 WebSocket 日志回调"""
+    def log_callback(msg: Dict[str, Any]):
+        async def send():
+            try:
+                await websocket.send_json(msg)
+            except Exception:
+                pass
+        asyncio.run_coroutine_threadsafe(send(), loop)
+    return log_callback
+
+
+@app.websocket("/ws/execute")
+async def ws_execute_flow(websocket: WebSocket, token: Optional[str] = None):
+    """
+    通过 WebSocket 执行 Flow 并实时获取进度和控制
+    支持 query 参数中的 token 鉴权
+    """
+    global _executor
+
+    # 先接受连接，再验证 Token（Starlette 不允许在 accept 前 close）
+    await websocket.accept()
+    logger.info("WebSocket 连接已建立")
+
+    # 验证 Token
+    if token != API_TOKEN:
+        logger.warning(f"WebSocket Token 验证失败: 收到='{token}', 期望='{API_TOKEN}'")
+        await websocket.send_json({"type": "error", "message": "认证失败: API Token 无效"})
+        await websocket.close(code=1008)
+        return
+
+    logger.info("WebSocket Token 验证通过")
+
+    engine: Optional[FlowEngine] = None
+    lock_acquired = False
+    try:
+        # 等待客户端发送初始运行配置
+        init_data = await websocket.receive_json()
+        action = init_data.get("action")
+
+        if action != "start":
+            await websocket.send_json({"type": "error", "message": "首个消息动作必须为 'start'"})
+            await websocket.close(code=1003)
+            return
+
+        flow_data = init_data.get("flow")
+        initial_context = init_data.get("initial_context", {})
+
+        if not flow_data or "steps" not in flow_data:
+            await websocket.send_json({"type": "error", "message": "缺失有效的 'flow' 定义"})
+            await websocket.close(code=1003)
+            return
+
+        # 串行化：共享单一浏览器，无法并行驱动两个流程
+        lock_acquired = _execution_lock.acquire(blocking=False)
+        if not lock_acquired:
+            await websocket.send_json({"type": "error", "message": "已有流程正在执行，请稍后再试"})
+            await websocket.close(code=1013)
+            return
+
+        # 每次执行新建独立引擎：拥有自己的 Context / 计数器 / 暂停-停止标志
+        loop = asyncio.get_running_loop()
+        engine = FlowEngine(browser=get_shared_browser())
+        engine.log_callback = make_log_callback(websocket, loop)
+
+        # 在线程池中执行流程
+        logger.info(f"在线程池中启动流程: {flow_data.get('name')}")
+        future = loop.run_in_executor(_executor, engine.execute, flow_data, initial_context)
+
+        # 轮询等待流程结束，同时读取客户端可能下发的控制指令
+        while not future.done():
+            try:
+                # 轮询读取控制指令（超时 100ms）
+                command = await asyncio.wait_for(websocket.receive_json(), timeout=0.1)
+                cmd_action = command.get("action")
+
+                if cmd_action == "pause":
+                    engine.pause()
+                elif cmd_action == "resume":
+                    engine.resume()
+                elif cmd_action == "stop":
+                    engine.stop()
+            except asyncio.TimeoutError:
+                # 轮询无控制指令，继续等待
+                continue
+            except WebSocketDisconnect:
+                # 用户断开连接，中止流程执行
+                logger.warning("客户端断开连接，中止流程")
+                engine.stop()
+                break
+            except Exception as e:
+                logger.error(f"WebSocket 处理指令异常: {str(e)}")
+                engine.stop()
+                break
+
+        # 执行完成，发送结果
+        if not future.cancelled():
+            result = await future
+            await websocket.send_json({
+                "type": "result",
+                "data": {
+                    "success": result.success,
+                    "flow_name": result.flow_name,
+                    "executed_steps": result.executed_steps,
+                    "total_steps": result.total_steps,
+                    "error": result.error,
+                    "context": result.context
+                }
+            })
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket 连接正常关闭")
+    except Exception as e:
+        logger.error(f"WebSocket 流程执行异常: {str(e)}", exc_info=True)
+        try:
+            await websocket.send_json({"type": "error", "message": f"系统错误: {str(e)}"})
+        except Exception:
+            pass
+    finally:
+        if engine is not None:
+            engine.log_callback = None
+        if lock_acquired:
+            _execution_lock.release()
+
+
+@app.post("/execute", response_model=ExecuteResponse, dependencies=[Depends(verify_token)])
+async def execute_flow(request: ExecuteRequest) -> ExecuteResponse:
+    """执行 Flow"""
+    # 串行化：共享单一浏览器，无法并行驱动两个流程
+    if not _execution_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有流程正在执行，请稍后再试")
+
+    try:
+        # 将 Pydantic 模型转换为字典（extra='allow' 保留 if/loop 等控制流字段）
+        flow_dict = request.flow.model_dump(exclude_none=True)
+
+        logger.info(f"收到执行请求: {flow_dict['name']}, {len(flow_dict['steps'])} 个步骤")
+
+        # 每次执行新建独立引擎，避免并发串改状态；浏览器共享但已被锁串行化
+        engine = FlowEngine(browser=get_shared_browser())
+
+        # 在线程池中执行，避免阻塞事件循环
+        loop = asyncio.get_running_loop()
+        result: ExecutionResult = await loop.run_in_executor(
+            _executor, engine.execute, flow_dict, request.initial_context
+        )
+
+        # 转换执行日志
+        execution_log = [
+            ExecutionLogEntry(**log_entry)
+            for log_entry in result.execution_log
+        ]
+
+        logger.info(f"执行完成: success={result.success}, executed={result.executed_steps}/{result.total_steps}")
+
+        return ExecuteResponse(
+            success=result.success,
+            flow_name=result.flow_name,
+            executed_steps=result.executed_steps,
+            total_steps=result.total_steps,
+            context=result.context,
+            execution_log=execution_log,
+            error=result.error
+        )
+
+    except Exception as e:
+        logger.error(f"执行出错: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _execution_lock.release()
+
+
+@app.post("/validate", dependencies=[Depends(verify_token)])
+async def validate_flow(flow: FlowDefinition) -> Dict[str, Any]:
+    """验证 Flow 定义"""
+    valid_step_types = {"open", "click", "input", "wait", "extract", "if", "loop"}
+    errors: List[str] = []
+
+    for i, step in enumerate(flow.steps):
+        if step.type not in valid_step_types:
+            errors.append(f"Step {i+1}: 未知类型 '{step.type}'")
+
+        # 验证必填字段
+        if step.type == "open" and not step.value:
+            errors.append(f"Step {i+1} (open): 需要 value (URL)")
+        if step.type in {"click", "input"} and not step.selector:
+            errors.append(f"Step {i+1} ({step.type}): 需要 selector")
+        if step.type == "input" and step.value is None:
+            errors.append(f"Step {i+1} (input): 需要 value")
+        if step.type == "wait" and step.value is None:
+            errors.append(f"Step {i+1} (wait): 需要 value (秒数)")
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors
+    }
+
+
+@app.get("/step-types", dependencies=[Depends(verify_token)])
+async def get_step_types() -> Dict[str, Any]:
+    """获取可用的 Step 类型"""
+    return {
+        "step_types": [
+            {
+                "type": "open",
+                "name": "打开页面",
+                "description": "打开指定 URL",
+                "required_fields": ["value"],
+                "optional_fields": ["timeout", "on_fail"]
+            },
+            {
+                "type": "click",
+                "name": "点击元素",
+                "description": "点击指定选择器的元素",
+                "required_fields": ["selector"],
+                "optional_fields": ["timeout", "on_fail"]
+            },
+            {
+                "type": "input",
+                "name": "输入文本",
+                "description": "向指定元素输入文本",
+                "required_fields": ["selector", "value"],
+                "optional_fields": ["timeout", "on_fail"]
+            },
+            {
+                "type": "wait",
+                "name": "等待",
+                "description": "等待指定秒数",
+                "required_fields": ["value"],
+                "optional_fields": ["on_fail"]
+            },
+            {
+                "type": "extract",
+                "name": "提取内容",
+                "description": "提取元素内容并保存",
+                "required_fields": ["selector"],
+                "optional_fields": ["save_path", "context_key", "timeout", "on_fail"]
+            }
+        ]
+    }
+
+
+# ============================================
+# 主入口
+# ============================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    logger.info("=" * 50)
+    logger.info("RPA Core FastAPI Server")
+    logger.info("=" * 50)
+
+    uvicorn.run(
+        "server:app",
+        host="127.0.0.1",
+        port=8765,
+        log_level="info"
+    )

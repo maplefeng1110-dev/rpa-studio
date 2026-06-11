@@ -1,0 +1,32 @@
+{
+    "name": "baidu_search_and_extract",
+    "description": "打开百度搜索并提取搜索结果保存到文件",
+    "steps": [
+        {
+            "type": "open",
+            "value": "https://www.baidu.com",
+            "timeout": 15,
+            "on_fail": "abort"
+        },
+        {
+            "type": "input",
+            "selector": "#kw",
+            "value": "{{search_keyword}}\n",
+            "timeout": 10,
+            "on_fail": "abort"
+        },
+        {
+            "type": "wait",
+            "value": 3,
+            "on_fail": "skip"
+        },
+        {
+            "type": "extract",
+            "selector": "#content_left",
+            "save_path": "{{output_file}}",
+            "context_key": "search_results",
+            "timeout": 10,
+            "on_fail": "abort"
+        }
+    ]
+}

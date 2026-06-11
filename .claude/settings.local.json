@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__visualize__read_me",
+      "mcp__visualize__show_widget",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(grep -E '\\\\.venv|\\\\.rpa_token|\\\\.DS_Store|node_modules|\\\\.log$')"
+    ]
+  }
+}
