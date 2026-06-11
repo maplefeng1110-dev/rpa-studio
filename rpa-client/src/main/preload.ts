@@ -54,6 +54,8 @@ const api = {
     secretsList: () => ipcRenderer.invoke('api:secrets-list'),
     secretsSet: (name: string, value: string) => ipcRenderer.invoke('api:secrets-set', name, value),
     secretsDelete: (name: string) => ipcRenderer.invoke('api:secrets-delete', name),
+    generateFlow: (instruction: string, urlHint?: string) =>
+      ipcRenderer.invoke('api:flow-generate', instruction, urlHint),
   },
 };
 

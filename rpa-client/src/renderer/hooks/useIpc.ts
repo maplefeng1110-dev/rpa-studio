@@ -221,6 +221,22 @@ export function useIpc() {
     return { success: false, error: 'API not available' };
   }, []);
 
+  // 自然语言生成 Flow
+  const generateFlow = useCallback(async (instruction: string, urlHint?: string) => {
+    if (hasElectronAPI) {
+      return await (window as any).electronAPI.api.generateFlow(instruction, urlHint);
+    }
+    try {
+      return await httpRequest('/flows/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction, url_hint: urlHint || null }),
+      });
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  }, []);
+
   // 监听 Python 日志
   useEffect(() => {
     if (hasElectronAPI) {
@@ -270,6 +286,7 @@ export function useIpc() {
       secretsList,
       secretsSet,
       secretsDelete,
+      generateFlow,
     },
   };
 }

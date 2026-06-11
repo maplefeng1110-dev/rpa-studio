@@ -693,5 +693,71 @@ class TestAILocatorParsing(unittest.TestCase):
         self.assertIsNone(loc.locate(failed_selectors=["#a"]))
 
 
+class TestFlowGen(unittest.TestCase):
+    """测试 NL → Flow 生成：校验器 + 解析（注入假 client，不联网）"""
+
+    def test_validator_ok(self):
+        from rpa_core.ai import validate_flow_dict
+        flow = {"name": "t", "steps": [
+            {"type": "open", "value": "https://x.com"},
+            {"type": "loop", "loop_type": "count", "value": "2", "steps": [
+                {"type": "click", "selector": "#a"},
+            ]},
+        ]}
+        self.assertEqual(validate_flow_dict(flow), [])
+
+    def test_validator_catches_nested_and_missing(self):
+        from rpa_core.ai import validate_flow_dict
+        errs = validate_flow_dict({"steps": [
+            {"type": "open"},  # 缺 value
+            {"type": "if", "condition": "x", "then": [{"type": "bad"}]},
+        ]})
+        self.assertTrue(any("open" in e for e in errs))
+        self.assertTrue(any("未知类型" in e for e in errs))
+
+    def test_validator_top_level(self):
+        from rpa_core.ai import validate_flow_dict
+        self.assertTrue(validate_flow_dict({}))  # 缺 steps
+        self.assertTrue(validate_flow_dict("nope"))
+
+    class _Block:
+        def __init__(self, text): self.type = "text"; self.text = text
+
+    class _Resp:
+        def __init__(self, text): self.content = [TestFlowGen._Block(text)]
+
+    class _FakeClient:
+        def __init__(self, text): self._text = text
+        class _M:
+            def __init__(self, text): self._text = text
+            def create(self, **kw): return TestFlowGen._Resp(self._text)
+        @property
+        def messages(self): return TestFlowGen._FakeClient._M(self._text)
+
+    def _gen(self, text):
+        from rpa_core.ai import FlowGenerator
+        g = FlowGenerator()
+        g._client = TestFlowGen._FakeClient(text)
+        return g
+
+    def test_generate_parses_fenced_json(self):
+        g = self._gen('```json\n{"name":"登录","steps":[{"type":"open","value":"https://x.com"}]}\n```')
+        r = g.generate("打开 x.com")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["flow"]["steps"][0]["type"], "open")
+
+    def test_generate_rejects_invalid_flow(self):
+        g = self._gen('{"steps":[{"type":"frobnicate"}]}')
+        r = g.generate("做点什么")
+        self.assertFalse(r["success"])
+        self.assertTrue(r["errors"])
+
+    def test_generate_handles_bad_json(self):
+        g = self._gen('not json at all')
+        r = g.generate("x")
+        self.assertFalse(r["success"])
+        self.assertIn("JSON", r["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

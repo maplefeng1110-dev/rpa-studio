@@ -27,7 +27,7 @@ from rpa_core.browser import BrowserAdapter
 from rpa_core.storage import RunHistory
 from rpa_core.scheduler import Scheduler, cron
 from rpa_core.vault import get_vault
-from rpa_core.ai import AILocator
+from rpa_core.ai import AILocator, FlowGenerator
 from rpa_core.utils import setup_logger
 
 # 配置日志
@@ -146,6 +146,12 @@ class SecretSet(BaseModel):
     value: str = Field(..., description="凭据明文值（将被加密存储）")
 
 
+class GenerateFlowRequest(BaseModel):
+    """自然语言生成 Flow 的请求"""
+    instruction: str = Field(..., description="自然语言需求描述")
+    url_hint: Optional[str] = Field(None, description="可选的起始网址提示")
+
+
 # ============================================
 # 全局状态
 #
@@ -171,6 +177,9 @@ _vault = get_vault()
 
 # AI 视觉兜底定位（按 RPA_AI_FALLBACK 开关 + ANTHROPIC_API_KEY 决定是否真正可用）
 _ai_locator = AILocator()
+
+# 自然语言生成 Flow（用户主动触发，仅需 ANTHROPIC_API_KEY）
+_flow_generator = FlowGenerator()
 
 
 def _record_run(result: ExecutionResult) -> None:
@@ -676,6 +685,25 @@ async def delete_secret(name: str) -> Dict[str, Any]:
     if not _vault.delete(name):
         raise HTTPException(status_code=404, detail="凭据不存在")
     return {"success": True}
+
+
+# ============================================
+# 自然语言生成 Flow
+# ============================================
+
+@app.post("/flows/generate", dependencies=[Depends(verify_token)])
+async def generate_flow(req: GenerateFlowRequest) -> Dict[str, Any]:
+    """根据自然语言需求生成一个 Flow（在线程池中调用 LLM，避免阻塞事件循环）。"""
+    if not _flow_generator.available:
+        raise HTTPException(
+            status_code=400,
+            detail="AI 生成不可用：请安装 anthropic 并配置 ANTHROPIC_API_KEY",
+        )
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        _executor, _flow_generator.generate, req.instruction, req.url_hint
+    )
+    return result
 
 
 # ============================================

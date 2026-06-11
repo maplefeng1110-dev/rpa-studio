@@ -200,4 +200,25 @@ export function registerPythonHandlers(mainWindow: BrowserWindow | null): void {
       return { success: false, error: (err as Error).message };
     }
   });
+
+  // 自然语言生成 Flow
+  ipcMain.handle('api:flow-generate', async (_event, instruction: string, urlHint?: string) => {
+    try {
+      const response = await fetch(`${pythonManager.getApiUrl()}/flows/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-RPA-Token': pythonManager.getApiToken(),
+        },
+        body: JSON.stringify({ instruction, url_hint: urlHint || null }),
+      });
+      const data = (await response.json()) as { detail?: string };
+      if (!response.ok) {
+        return { success: false, error: data?.detail || `HTTP ${response.status}` };
+      }
+      return data;
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  });
 }

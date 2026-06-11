@@ -8,6 +8,7 @@ import type { FlowDefinition } from '../../types/flow';
 import { createFlow, clearDirty, setFlow, setFlows, updateFlowInfo } from '../../store/flowSlice';
 import { Button } from '../common/Button';
 import { SecretsModal } from '../secrets/SecretsModal';
+import { GenerateFlowModal } from '../generate/GenerateFlowModal';
 import { useIpc } from '../../hooks/useIpc';
 import { useExecution } from '../../hooks/useExecution';
 
@@ -23,6 +24,7 @@ export const Header: React.FC<HeaderProps> = () => {
 
   const [openMenu, setOpenMenu] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
+  const [generateOpen, setGenerateOpen] = useState(false);
   const didInit = useRef(false);
 
   // 拉取已保存流程列表（后端按更新时间倒序返回）
@@ -142,6 +144,9 @@ export const Header: React.FC<HeaderProps> = () => {
         <Button variant="secondary" onClick={handleNewFlow} disabled={status === 'running' || status === 'paused'}>
           新建
         </Button>
+        <Button variant="secondary" onClick={() => setGenerateOpen(true)} disabled={status === 'running' || status === 'paused'}>
+          ✨ AI 生成
+        </Button>
 
         {/* 打开已保存的流程 */}
         <div className="relative">
@@ -234,6 +239,7 @@ export const Header: React.FC<HeaderProps> = () => {
       </div>
 
       {secretsOpen && <SecretsModal onClose={() => setSecretsOpen(false)} />}
+      {generateOpen && <GenerateFlowModal onClose={() => setGenerateOpen(false)} />}
     </header>
   );
 };

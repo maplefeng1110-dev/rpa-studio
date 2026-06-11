@@ -13,6 +13,7 @@ const IPC_CHANNELS = [
   'api:health', 'api:execute', 'api:validate', 'api:step-types',
   'api:pick-element-start', 'api:pick-element-result',
   'api:secrets-list', 'api:secrets-set', 'api:secrets-delete',
+  'api:flow-generate',
 ];
 
 export function registerIpcHandlers(mainWindow: BrowserWindow | null): void {
