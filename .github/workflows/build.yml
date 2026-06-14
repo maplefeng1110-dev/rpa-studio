@@ -20,9 +20,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 注：macOS-13(Intel) 免费 runner 长期排不到队，已移除。
+        # 现代 Mac 都是 Apple Silicon(arm64)；若确需 Intel 版，在 Intel Mac 本地
+        # 跑 npm run package:mac，或把下面这行加回来用自托管/付费 runner：
+        #   - { os: macos-13, label: macOS-x64, platform: mac, arch: x64 }
         include:
           - { os: macos-14, label: macOS-arm64, platform: mac, arch: arm64 }
-          - { os: macos-13, label: macOS-x64, platform: mac, arch: x64 }
           - { os: windows-latest, label: Windows-x64, platform: win, arch: x64 }
 
     steps:
