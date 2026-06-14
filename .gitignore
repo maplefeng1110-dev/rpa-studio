@@ -19,6 +19,10 @@ rpa-client/dist-electron/
 rpa-client/out/
 rpa-client/release/
 
+# 打包产物（PyInstaller 冻结后端 + electron-builder）
+build/
+rpa-client/resources/backend/
+
 # 系统 / 编辑器
 .DS_Store
 *.log

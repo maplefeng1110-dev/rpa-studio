@@ -22,7 +22,6 @@ export class PythonManager {
   private readApiTokenFromFile(): string {
     try {
       const candidates = [
-        '/Users/ffm1110/workapp/rpa/.rpa_token',
         path.join(process.cwd(), '.rpa_token'),
         path.join(process.cwd(), '../.rpa_token'),
         path.join(__dirname, '../../../../../.rpa_token'),
@@ -125,25 +124,34 @@ export class PythonManager {
     }
 
     try {
-      // 找到 Python 解释器和 server.py 路径
-      const pythonPath = await this.findPython();
-      const serverPath = this.findServerScript();
-
-      if (!pythonPath) {
-        throw new Error('未找到 Python 解释器');
-      }
-      if (!serverPath) {
-        throw new Error('未找到 server.py');
-      }
-
-      // 生成随机 Token
+      // 生成随机 Token，通过环境变量传给后端（打包后无需读文件）
       this.apiToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 
-      this.log(`启动 Python 后端: ${pythonPath} ${serverPath}`);
+      // 决定如何启动后端：打包后用冻结的可执行文件；开发态用 Python + server.py
+      let command: string;
+      let args: string[];
+      let cwd: string;
+
+      const frozen = this.findFrozenBackend();
+      if (frozen) {
+        command = frozen;
+        args = [];
+        cwd = path.dirname(frozen);
+        this.log(`启动冻结后端: ${command}`);
+      } else {
+        const pythonPath = await this.findPython();
+        const serverPath = this.findServerScript();
+        if (!pythonPath) throw new Error('未找到 Python 解释器');
+        if (!serverPath) throw new Error('未找到 server.py');
+        command = pythonPath;
+        args = [serverPath];
+        cwd = path.dirname(serverPath);
+        this.log(`启动 Python 后端: ${pythonPath} ${serverPath}`);
+      }
 
       // 启动子进程
-      this.process = spawn(pythonPath, [serverPath], {
-        cwd: path.dirname(serverPath),
+      this.process = spawn(command, args, {
+        cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
           ...process.env,
@@ -255,6 +263,31 @@ export class PythonManager {
     if (this.onLogCallback) {
       this.onLogCallback(logLine);
     }
+  }
+
+  /**
+   * 查找打包后随附的冻结后端可执行文件。
+   * 打包态：<resources>/backend/rpa-backend[.exe]。开发态返回 null（走 Python）。
+   * 也支持开发态用 RPA_BACKEND_BIN 指定冻结产物做联调。
+   */
+  private findFrozenBackend(): string | null {
+    const exe = 'rpa-backend' + (process.platform === 'win32' ? '.exe' : '');
+
+    const override = process.env.RPA_BACKEND_BIN;
+    if (override && fs.existsSync(override)) return override;
+
+    const candidates: string[] = [];
+    if (app.isPackaged) {
+      candidates.push(path.join(process.resourcesPath, 'backend', exe));
+    } else {
+      // 开发态如果本地已经冻结过，也允许直接用
+      candidates.push(path.join(__dirname, '../../../../rpa-client/resources/backend', exe));
+      candidates.push(path.join(process.cwd(), 'resources/backend', exe));
+    }
+    for (const c of candidates) {
+      if (fs.existsSync(c)) return c;
+    }
+    return null;
   }
 
   private async findPython(): Promise<string | null> {

@@ -11,6 +11,9 @@
     "preview": "vite preview",
     "electron:dev": "concurrently \"npm run dev\" \"npm run build:main && wait-on http://localhost:5173 && electron .\"",
     "electron:build": "npm run build && electron-builder",
+    "backend": "python ../build_backend.py",
+    "package:mac": "npm run backend && npm run build && electron-builder --mac",
+    "package:win": "npm run backend && npm run build && electron-builder --win",
     "lint": "eslint src --ext ts,tsx"
   },
   "dependencies": {
@@ -41,11 +44,40 @@
     "appId": "com.rpa.client",
     "productName": "RPA Client",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
       "package.json"
-    ]
+    ],
+    "extraResources": [
+      {
+        "from": "resources/backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ],
+      "category": "public.app-category.productivity",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
   }
 }
