@@ -207,6 +207,14 @@ export class PythonManager {
 
     this.log('正在停止 Python 后端...');
 
+    // 退出时先摘掉输出监听，避免进程被杀过程中仍触发日志回调（此时窗口可能已销毁）
+    try {
+      this.process.stdout?.removeAllListeners('data');
+      this.process.stderr?.removeAllListeners('data');
+    } catch {
+      // 忽略
+    }
+
     return new Promise((resolve) => {
       if (this.process?.pid) {
         kill(this.process.pid, (err) => {
@@ -261,7 +269,11 @@ export class PythonManager {
       this.logs.shift();
     }
     if (this.onLogCallback) {
-      this.onLogCallback(logLine);
+      try {
+        this.onLogCallback(logLine);
+      } catch {
+        // 回调可能因窗口已销毁而抛错，忽略，避免成为主进程未捕获异常
+      }
     }
   }
 

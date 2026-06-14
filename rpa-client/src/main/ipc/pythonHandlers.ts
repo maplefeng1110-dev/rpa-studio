@@ -7,10 +7,14 @@ import type { FlowDefinition, ExecutionResponse } from '../../renderer/types/flo
 
 // 注册 Python 相关的 IPC 处理器
 export function registerPythonHandlers(mainWindow: BrowserWindow | null): void {
-  // 设置日志回调
+  // 设置日志回调（窗口可能已销毁——退出时 Python 仍会吐日志，必须先判活再发）
   pythonManager.setOnLogCallback((log: string) => {
-    if (mainWindow) {
-      mainWindow.webContents.send('python:log', log);
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send('python:log', log);
+      }
+    } catch {
+      // 窗口已销毁等情况，忽略，避免主进程未捕获异常弹错误框
     }
   });
 
