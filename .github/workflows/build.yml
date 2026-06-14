@@ -1,0 +1,86 @@
+name: 打包客户端
+
+# 手动触发，或推送 v* 标签时自动构建并发布 Release
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write   # 创建 / 更新 Release 需要
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, label: macOS-arm64, platform: mac, arch: arm64 }
+          - { os: macos-13, label: macOS-x64, platform: mac, arch: x64 }
+          - { os: windows-latest, label: Windows-x64, platform: win, arch: x64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # PyInstaller 产出的后端架构 = 该 runner 上 Python 的架构
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: rpa_core/requirements.txt
+
+      - name: 安装后端依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r rpa_core/requirements.txt "pyinstaller>=6.0"
+
+      - name: 冻结 Python 后端
+        run: python build_backend.py
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: rpa-client/package-lock.json
+
+      - name: 安装前端依赖
+        working-directory: rpa-client
+        run: npm ci
+
+      - name: 构建前端
+        working-directory: rpa-client
+        run: npm run build
+
+      - name: electron-builder 打包
+        working-directory: rpa-client
+        env:
+          # CI 无证书：跳过 mac 签名自动发现，避免失败（正式分发请配置证书 / 公证）
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: RPA-Client-${{ matrix.label }}
+          if-no-files-found: warn
+          path: |
+            rpa-client/release/*.dmg
+            rpa-client/release/*.zip
+            rpa-client/release/*.exe
+
+      # 推送 v* 标签时，把产物附加到对应的 GitHub Release
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rpa-client/release/*.dmg
+            rpa-client/release/*.zip
+            rpa-client/release/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
