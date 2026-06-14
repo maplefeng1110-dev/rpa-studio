@@ -13,6 +13,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write   # 创建 / 更新 Release 需要
+    env:
+      # 强制 Python 用 UTF-8，避免 Windows 控制台 cp1252 无法输出中文/emoji 而崩溃
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +64,8 @@ jobs:
         env:
           # CI 无证书：跳过 mac 签名自动发现，避免失败（正式分发请配置证书 / 公证）
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 不传 GH_TOKEN：否则 electron-builder 会尝试配置 GitHub 发布而崩溃；
+          # 发布由后面的 action-gh-release 单独处理。
         run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
 
       - name: 上传构建产物

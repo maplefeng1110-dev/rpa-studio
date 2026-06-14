@@ -19,6 +19,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows 默认控制台用 cp1252，打印中文/emoji 会 UnicodeEncodeError。强制 UTF-8。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent
 ENTRY = ROOT / "rpa_core" / "server_entry.py"
 DEST = ROOT / "rpa-client" / "resources" / "backend"
