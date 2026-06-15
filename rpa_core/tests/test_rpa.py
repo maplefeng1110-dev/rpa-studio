@@ -809,5 +809,62 @@ class TestBrowserPool(unittest.TestCase):
             BrowserPool(0, lambda: None)
 
 
+class TestAIConfigStore(unittest.TestCase):
+    """测试 AI 配置存储：key 加密、非敏感项落 JSON、不回读 key、保留名不进凭据列表"""
+
+    def setUp(self):
+        import tempfile, os
+        from cryptography.fernet import Fernet
+        from rpa_core.vault import SecretVault
+        from rpa_core.ai import AIConfigStore
+        self.tmp = tempfile.mkdtemp()
+        self.vault = SecretVault(db_path=os.path.join(self.tmp, "v.db"), key=Fernet.generate_key())
+        self.store = AIConfigStore(self.vault, path=os.path.join(self.tmp, "ai.json"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_default_no_key(self):
+        import os
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        pub = self.store.public()
+        self.assertFalse(pub["has_key"])
+        self.assertEqual(pub["model"], "claude-opus-4-8")
+
+    def test_update_and_public(self):
+        self.store.update(api_key="sk-test-123", base_url="https://proxy.example", model="m1", fallback_enabled=True)
+        pub = self.store.public()
+        self.assertTrue(pub["has_key"])
+        self.assertEqual(pub["base_url"], "https://proxy.example")
+        self.assertEqual(pub["model"], "m1")
+        self.assertTrue(pub["fallback_enabled"])
+        # public 绝不含明文 key
+        self.assertNotIn("sk-test-123", str(pub))
+        # 但内部能取到
+        self.assertEqual(self.store.get_api_key(), "sk-test-123")
+
+    def test_key_hidden_from_vault_list(self):
+        self.store.update(api_key="sk-secret")
+        names = [s["name"] for s in self.vault.list_names()]
+        self.assertNotIn("__rpa_ai_key__", names)  # 保留名不展示给用户
+
+    def test_clear_key(self):
+        import os
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        self.store.update(api_key="sk-x")
+        self.assertTrue(self.store.public()["has_key"])
+        self.store.update(clear_key=True)
+        self.assertFalse(self.store.public()["has_key"])
+
+    def test_locator_uses_config(self):
+        from rpa_core.ai import AILocator
+        loc = AILocator(config_store=self.store)
+        # 未配置 key 且未开兜底 -> 不可用
+        import os
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        self.assertFalse(loc.available)
+
+
 if __name__ == "__main__":
     unittest.main()

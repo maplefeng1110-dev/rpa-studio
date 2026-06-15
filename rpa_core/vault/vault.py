@@ -87,10 +87,10 @@ class SecretVault:
             raise ValueError(f"凭据 '{name}' 解密失败：密钥不匹配")
 
     def list_names(self) -> List[str]:
-        """只返回凭据名称，绝不返回明文。"""
+        """只返回凭据名称，绝不返回明文。__rpa_ 开头的内部保留名（如 AI key）不展示。"""
         with self._lock, closing(sqlite3.connect(self.db_path)) as conn:
             rows = conn.execute("SELECT name, updated_at FROM secrets ORDER BY name").fetchall()
-        return [{"name": r[0], "updated_at": r[1]} for r in rows]
+        return [{"name": r[0], "updated_at": r[1]} for r in rows if not r[0].startswith("__rpa_")]
 
     def delete(self, name: str) -> bool:
         with self._lock, closing(sqlite3.connect(self.db_path)) as conn, conn:

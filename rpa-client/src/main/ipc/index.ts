@@ -14,6 +14,7 @@ const IPC_CHANNELS = [
   'api:pick-element-start', 'api:pick-element-result',
   'api:secrets-list', 'api:secrets-set', 'api:secrets-delete',
   'api:flow-generate',
+  'api:ai-config-get', 'api:ai-config-set', 'api:ai-config-test',
 ];
 
 export function registerIpcHandlers(mainWindow: BrowserWindow | null): void {

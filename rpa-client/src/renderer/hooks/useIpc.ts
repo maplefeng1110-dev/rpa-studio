@@ -237,6 +237,24 @@ export function useIpc() {
     }
   }, []);
 
+  // AI 配置
+  const aiConfigGet = useCallback(async () => {
+    if (hasElectronAPI) return await (window as any).electronAPI.api.aiConfigGet();
+    return httpRequest('/ai/config');
+  }, []);
+  const aiConfigSet = useCallback(async (cfg: Record<string, unknown>) => {
+    if (hasElectronAPI) return await (window as any).electronAPI.api.aiConfigSet(cfg);
+    return httpRequest('/ai/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+  }, []);
+  const aiConfigTest = useCallback(async () => {
+    if (hasElectronAPI) return await (window as any).electronAPI.api.aiConfigTest();
+    return httpRequest('/ai/config/test', { method: 'POST' });
+  }, []);
+
   // 监听 Python 日志
   useEffect(() => {
     if (hasElectronAPI) {
@@ -287,6 +305,9 @@ export function useIpc() {
       secretsSet,
       secretsDelete,
       generateFlow,
+      aiConfigGet,
+      aiConfigSet,
+      aiConfigTest,
     },
   };
 }

@@ -92,11 +92,16 @@ def validate_flow_dict(flow: Any) -> List[str]:
 class FlowGenerator:
     """自然语言 → Flow 生成器。缺少 anthropic 依赖或 API key 时不可用。"""
 
-    def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None):
+    def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None, config_store=None):
+        self._config_store = config_store
         self.model = model or os.environ.get("RPA_LLM_MODEL", "claude-opus-4-8")
         self._api_key = api_key
         self._client = None
         self._init_error: Optional[str] = None
+
+    def reset(self) -> None:
+        """配置变更后丢弃缓存 client。"""
+        self._client = None
 
     @property
     def available(self) -> bool:
@@ -110,8 +115,18 @@ class FlowGenerator:
         except Exception as e:
             self._init_error = f"anthropic SDK 未安装: {e}"
             return None
+        api_key, base_url = self._api_key, None
+        if self._config_store is not None:
+            c = self._config_store.get()
+            api_key, base_url, self.model = c.api_key, c.base_url, c.model
+        if not api_key:
+            self._init_error = "未配置 API key"
+            return None
         try:
-            self._client = anthropic.Anthropic(api_key=self._api_key) if self._api_key else anthropic.Anthropic()
+            kwargs = {"api_key": api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            self._client = anthropic.Anthropic(**kwargs)
         except Exception as e:
             self._init_error = str(e)
             return None

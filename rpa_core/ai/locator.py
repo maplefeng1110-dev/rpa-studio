@@ -44,7 +44,9 @@ class AILocator:
     """多模态 LLM 兜底定位器。未开启或缺少依赖/凭据时静默不可用。"""
 
     def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None,
-                 enabled: Optional[bool] = None):
+                 enabled: Optional[bool] = None, config_store=None):
+        # config_store（AIConfigStore）为客户端内配置；提供时优先于环境变量/构造参数
+        self._config_store = config_store
         self.model = model or os.environ.get("RPA_LLM_MODEL", "claude-opus-4-8")
         if enabled is None:
             enabled = os.environ.get("RPA_AI_FALLBACK", "").strip().lower() in ("1", "true", "yes", "on")
@@ -53,8 +55,15 @@ class AILocator:
         self._client = None
         self._init_error: Optional[str] = None
 
+    def reset(self) -> None:
+        """配置变更后调用：丢弃缓存的 client，下次按新配置重建。"""
+        self._client = None
+
     @property
     def available(self) -> bool:
+        if self._config_store is not None:
+            c = self._config_store.get()
+            return bool(c.fallback_enabled and c.api_key) and self._ensure_client() is not None
         return self._enabled and self._ensure_client() is not None
 
     def _ensure_client(self):
@@ -65,8 +74,18 @@ class AILocator:
         except Exception as e:  # 未安装
             self._init_error = f"anthropic SDK 未安装: {e}"
             return None
+        # 解析 api_key / base_url / model（优先客户端配置）
+        api_key, base_url = self._api_key, None
+        if self._config_store is not None:
+            c = self._config_store.get()
+            api_key, base_url, self.model = c.api_key, c.base_url, c.model
         try:
-            self._client = anthropic.Anthropic(api_key=self._api_key) if self._api_key else anthropic.Anthropic()
+            kwargs = {}
+            if api_key:
+                kwargs["api_key"] = api_key
+            if base_url:
+                kwargs["base_url"] = base_url
+            self._client = anthropic.Anthropic(**kwargs)
         except Exception as e:  # 缺少 API key 等
             self._init_error = str(e)
             return None

@@ -27,7 +27,7 @@ from rpa_core.browser import BrowserAdapter, BrowserPool
 from rpa_core.storage import RunHistory
 from rpa_core.scheduler import Scheduler, cron
 from rpa_core.vault import get_vault
-from rpa_core.ai import AILocator, FlowGenerator
+from rpa_core.ai import AILocator, FlowGenerator, AIConfigStore
 from rpa_core.utils import setup_logger
 
 # 配置日志
@@ -152,6 +152,15 @@ class GenerateFlowRequest(BaseModel):
     url_hint: Optional[str] = Field(None, description="可选的起始网址提示")
 
 
+class AIConfigUpdate(BaseModel):
+    """AI 配置更新（key 加密存储，绝不回读）"""
+    api_key: Optional[str] = Field(None, description="API key（留空=不改）")
+    base_url: Optional[str] = Field(None, description="API 地址（base_url），可指代理/自托管")
+    model: Optional[str] = Field(None, description="模型，默认 claude-opus-4-8")
+    fallback_enabled: Optional[bool] = Field(None, description="是否开启执行时的 AI 视觉兜底")
+    clear_key: bool = Field(False, description="为 true 时清除已存的 key")
+
+
 # ============================================
 # 全局状态
 #
@@ -185,11 +194,12 @@ _history = RunHistory()
 # 凭据保险库（加密）
 _vault = get_vault()
 
-# AI 视觉兜底定位（按 RPA_AI_FALLBACK 开关 + ANTHROPIC_API_KEY 决定是否真正可用）
-_ai_locator = AILocator()
+# AI 配置（个人版：用户在客户端自配 key/地址/模型/兜底开关，key 走加密保险库）
+_ai_config = AIConfigStore(_vault)
 
-# 自然语言生成 Flow（用户主动触发，仅需 ANTHROPIC_API_KEY）
-_flow_generator = FlowGenerator()
+# AI 视觉兜底定位 + 自然语言生成 Flow，都从配置存储取参数
+_ai_locator = AILocator(config_store=_ai_config)
+_flow_generator = FlowGenerator(config_store=_ai_config)
 
 
 def _record_run(result: ExecutionResult) -> None:
@@ -745,6 +755,51 @@ async def delete_secret(name: str) -> Dict[str, Any]:
     if not _vault.delete(name):
         raise HTTPException(status_code=404, detail="凭据不存在")
     return {"success": True}
+
+
+# ============================================
+# AI 配置（客户端内自配 API）
+# ============================================
+
+@app.get("/ai/config", dependencies=[Depends(verify_token)])
+async def get_ai_config() -> Dict[str, Any]:
+    """返回 AI 配置（不含 key，仅 has_key 标志）。"""
+    return _ai_config.public()
+
+
+@app.post("/ai/config", dependencies=[Depends(verify_token)])
+async def set_ai_config(req: AIConfigUpdate) -> Dict[str, Any]:
+    """更新 AI 配置；key 加密存入保险库，并让 AI 组件按新配置重建。"""
+    _ai_config.update(
+        api_key=req.api_key, base_url=req.base_url, model=req.model,
+        fallback_enabled=req.fallback_enabled, clear_key=req.clear_key,
+    )
+    _ai_locator.reset()
+    _flow_generator.reset()
+    return _ai_config.public()
+
+
+def _test_ai_connection():
+    client = _flow_generator._ensure_client()
+    if client is None:
+        return False, "未配置 API key 或 SDK 不可用"
+    cfg = _ai_config.get()
+    try:
+        client.messages.create(
+            model=cfg.model, max_tokens=8,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        return True, f"连接成功（模型 {cfg.model}）"
+    except Exception as e:
+        return False, str(e)
+
+
+@app.post("/ai/config/test", dependencies=[Depends(verify_token)])
+async def test_ai_config() -> Dict[str, Any]:
+    """用当前配置做一次最小调用，验证 key/地址/模型可用。"""
+    loop = asyncio.get_running_loop()
+    ok, msg = await loop.run_in_executor(_executor, _test_ai_connection)
+    return {"success": ok, "message": msg}
 
 
 # ============================================

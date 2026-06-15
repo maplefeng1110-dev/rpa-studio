@@ -205,6 +205,47 @@ export function registerPythonHandlers(mainWindow: BrowserWindow | null): void {
     }
   });
 
+  // AI 配置：读取（不含 key）
+  ipcMain.handle('api:ai-config-get', async () => {
+    try {
+      const response = await fetch(`${pythonManager.getApiUrl()}/ai/config`, {
+        headers: { 'X-RPA-Token': pythonManager.getApiToken() },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  });
+
+  // AI 配置：更新
+  ipcMain.handle('api:ai-config-set', async (_event, cfg: Record<string, unknown>) => {
+    try {
+      const response = await fetch(`${pythonManager.getApiUrl()}/ai/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-RPA-Token': pythonManager.getApiToken() },
+        body: JSON.stringify(cfg),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  });
+
+  // AI 配置：测试连接
+  ipcMain.handle('api:ai-config-test', async () => {
+    try {
+      const response = await fetch(`${pythonManager.getApiUrl()}/ai/config/test`, {
+        method: 'POST',
+        headers: { 'X-RPA-Token': pythonManager.getApiToken() },
+      });
+      return await response.json();
+    } catch (err) {
+      return { success: false, message: (err as Error).message };
+    }
+  });
+
   // 自然语言生成 Flow
   ipcMain.handle('api:flow-generate', async (_event, instruction: string, urlHint?: string) => {
     try {

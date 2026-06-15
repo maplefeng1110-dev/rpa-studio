@@ -56,6 +56,9 @@ const api = {
     secretsDelete: (name: string) => ipcRenderer.invoke('api:secrets-delete', name),
     generateFlow: (instruction: string, urlHint?: string) =>
       ipcRenderer.invoke('api:flow-generate', instruction, urlHint),
+    aiConfigGet: () => ipcRenderer.invoke('api:ai-config-get'),
+    aiConfigSet: (cfg: Record<string, unknown>) => ipcRenderer.invoke('api:ai-config-set', cfg),
+    aiConfigTest: () => ipcRenderer.invoke('api:ai-config-test'),
   },
 };
 
